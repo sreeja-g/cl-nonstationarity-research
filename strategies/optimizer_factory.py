@@ -7,8 +7,9 @@ def build_optimizer(
     lr=0.01,
     momentum=0.9,
     weight_decay=0.0,
+    **kwargs,
 ):
-    optimizer_name = optimizer_name.lower()
+    optimizer_name = optimizer_name.lower().strip()
 
     if optimizer_name == "sgd":
         return SGD(
@@ -16,6 +17,7 @@ def build_optimizer(
             lr=lr,
             momentum=momentum,
             weight_decay=weight_decay,
+            **kwargs,
         )
 
     if optimizer_name == "adam":
@@ -23,6 +25,7 @@ def build_optimizer(
             model.parameters(),
             lr=lr,
             weight_decay=weight_decay,
+            **kwargs,
         )
 
     if optimizer_name == "adamw":
@@ -30,6 +33,9 @@ def build_optimizer(
             model.parameters(),
             lr=lr,
             weight_decay=weight_decay,
+            **kwargs,
         )
 
-    raise ValueError(f"Unknown optimizer_name: {optimizer_name}")
+    raise ValueError(
+        f"Unknown optimizer_name: {optimizer_name}"
+    )

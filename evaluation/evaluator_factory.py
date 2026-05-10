@@ -1,14 +1,28 @@
 import os
 
-from avalanche.logging import InteractiveLogger, TextLogger, TensorboardLogger
+from avalanche.logging import (
+    InteractiveLogger,
+    TextLogger,
+    TensorboardLogger,
+)
+
 from avalanche.training.plugins import EvaluationPlugin
-from avalanche.evaluation.metrics import accuracy_metrics, loss_metrics
+
+from avalanche.evaluation.metrics import (
+    accuracy_metrics,
+    loss_metrics,
+)
+
 from avalanche.evaluation import PluginMetric
 from avalanche.evaluation.metric_results import MetricValue
 from avalanche.evaluation.metric_utils import get_metric_name
 
 
 class ModelSizeMetric(PluginMetric):
+    """
+    Tracks total model parameter count after each experience.
+    """
+
     def __init__(self):
         super().__init__()
 
@@ -19,7 +33,9 @@ class ModelSizeMetric(PluginMetric):
         return None
 
     def after_training_exp(self, strategy):
-        model_size = sum(p.numel() for p in strategy.model.parameters())
+        model_size = sum(
+            p.numel() for p in strategy.model.parameters()
+        )
 
         metric_name = get_metric_name(
             self,
@@ -37,6 +53,10 @@ class ModelSizeMetric(PluginMetric):
 
 
 class ReplaySizeMetric(PluginMetric):
+    """
+    Tracks total replay buffer size after each experience.
+    """
+
     def __init__(self):
         super().__init__()
 
@@ -49,8 +69,9 @@ class ReplaySizeMetric(PluginMetric):
     def after_training_exp(self, strategy):
         replay_size = 0
 
-        if hasattr(strategy, "storage_policy"):
-            replay_size = len(strategy.storage_policy.buffer)
+        for plugin in strategy.plugins:
+            if hasattr(plugin, "storage_policy"):
+                replay_size += len(plugin.storage_policy.buffer)
 
         metric_name = get_metric_name(
             self,
@@ -73,6 +94,14 @@ def build_evaluator(
     use_text=True,
     use_tensorboard=True,
 ):
+    """
+    Builds Avalanche evaluation plugin with:
+    - accuracy metrics
+    - loss metrics
+    - model size tracking
+    - replay buffer tracking
+    """
+
     os.makedirs(log_dir, exist_ok=True)
 
     loggers = []
@@ -82,12 +111,19 @@ def build_evaluator(
 
     if use_text:
         loggers.append(
-            TextLogger(open(os.path.join(log_dir, "log.txt"), "a"))
+            TextLogger(
+                open(
+                    os.path.join(log_dir, "log.txt"),
+                    "a",
+                )
+            )
         )
 
     if use_tensorboard:
         loggers.append(
-            TensorboardLogger(tb_log_dir=log_dir)
+            TensorboardLogger(
+                tb_log_dir=log_dir
+            )
         )
 
     evaluator = EvaluationPlugin(
