@@ -30,10 +30,22 @@ def build_strategy(
     device=None,
     **kwargs,
 ):
-    strategy_name = strategy_name.lower()
+    strategy_name = strategy_name.lower().strip()
+
+    # -----------------------------------
+    # Auto device selection
+    # -----------------------------------
 
     if device is None:
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+        device = (
+            "cuda"
+            if torch.cuda.is_available()
+            else "cpu"
+        )
+
+    # -----------------------------------
+    # Optimizer
+    # -----------------------------------
 
     if optimizer is None:
         optimizer = build_optimizer(
@@ -44,8 +56,16 @@ def build_strategy(
             weight_decay=weight_decay,
         )
 
+    # -----------------------------------
+    # Loss
+    # -----------------------------------
+
     if criterion is None:
         criterion = CrossEntropyLoss()
+
+    # -----------------------------------
+    # Plugins
+    # -----------------------------------
 
     if plugins is None:
         plugins = build_plugins(
@@ -53,8 +73,14 @@ def build_strategy(
             **kwargs,
         )
 
+    plugins = list(plugins)
+
     if extra_plugins is not None:
-        plugins = plugins + extra_plugins
+        plugins += extra_plugins
+
+    # -----------------------------------
+    # Shared Avalanche arguments
+    # -----------------------------------
 
     common_args = dict(
         model=model,
@@ -65,13 +91,29 @@ def build_strategy(
         eval_mb_size=eval_mb_size,
         device=device,
         evaluator=evaluator,
-        plugins=plugins,
     )
 
+    # -----------------------------------
+    # Strategies
+    # -----------------------------------
+
     if strategy_name == "naive":
-        return Naive(**common_args)
+
+        return Naive(
+            plugins=plugins,
+            **common_args,
+        )
 
     if strategy_name == "joint":
-        return JointTraining(**common_args)
 
-    raise ValueError(f"Unknown strategy_name: {strategy_name}")
+        return JointTraining(
+            **common_args,
+        )
+
+    # -----------------------------------
+    # Unknown strategy
+    # -----------------------------------
+
+    raise ValueError(
+        f"Unknown strategy_name: {strategy_name}"
+    )

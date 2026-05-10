@@ -1,3 +1,5 @@
+# evaluation/experiment_runner.py
+
 import os
 import time
 import json
@@ -5,6 +7,12 @@ import numpy as np
 
 from evaluation.result_matrix import ResultMatrix
 from evaluation.continual_metrics import compute_summary_metrics
+
+
+def _to_float(value):
+    if hasattr(value, "item"):
+        return float(value.item())
+    return float(value)
 
 
 def _extract_metric(last_metrics, metric_name):
@@ -16,34 +24,30 @@ def _extract_metric(last_metrics, metric_name):
     if len(matches) == 0:
         raise KeyError(f"Could not find metric: {metric_name}")
 
-    value = matches[-1]
-
-    if hasattr(value, "item"):
-        value = value.item()
-
-    return value
+    return _to_float(matches[-1])
 
 
-def get_dataset_memory_size(benchmark):
+def get_lifetime_data_size(benchmark):
     return sum(len(exp.dataset) for exp in benchmark.train_stream)
 
 
 def get_test_experience_sizes(benchmark):
-    return np.array(
+    return np.asarray(
         [len(exp.dataset) for exp in benchmark.test_stream],
         dtype=float,
     )
 
 
 def weighted_mean_accuracy(accs, sizes):
-    accs = np.array(accs, dtype=float)
-    sizes = np.array(sizes, dtype=float)
+    accs = np.asarray(accs, dtype=float)
+    sizes = np.asarray(sizes, dtype=float)
 
     valid = ~np.isnan(accs)
+
     accs = accs[valid]
     sizes = sizes[valid]
 
-    if len(accs) == 0 or np.sum(sizes) == 0:
+    if accs.size == 0 or np.sum(sizes) == 0:
         return np.nan
 
     return float(np.sum(accs * sizes) / np.sum(sizes))
@@ -53,24 +57,50 @@ def estimate_ops(
     train_size,
     model_size,
     replay_size=0,
-    regularization_multiplier=1.0,
-    routing_multiplier=1.0,
-    memory_update_multiplier=0.0,
+    regularization_overhead=0.0,
+    routing_overhead=0.0,
+    memory_update_overhead=0.0,
 ):
-    baseline_ops = train_size * model_size
+    """
+    Estimates relative training compute.
 
+    forward_backward_ops:
+        baseline SGD compute
+
+    total_train_ops:
+        baseline + replay + additional continual learning overheads
+    """
+
+    # Standard SGD cost
+    forward_backward_ops = train_size * model_size
+
+    # Replay increases effective batch processing
     effective_train_size = train_size + replay_size
 
-    total_ops = (
-        effective_train_size
-        * model_size
-        * regularization_multiplier
-        * routing_multiplier
+    base_training_cost = (
+        effective_train_size * model_size
     )
 
-    total_ops += memory_update_multiplier * train_size * model_size
+    overhead_multiplier = (
+        1.0
+        + regularization_overhead
+        + routing_overhead
+    )
 
-    return baseline_ops, total_ops
+    total_train_ops = (
+        base_training_cost * overhead_multiplier
+    )
+
+    total_train_ops += (
+        memory_update_overhead
+        * train_size
+        * model_size
+    )
+
+    return (
+        float(forward_backward_ops),
+        float(total_train_ops),
+    )
 
 
 def run_continual_experiment(
@@ -80,6 +110,7 @@ def run_continual_experiment(
     regularization_multiplier=1.0,
     routing_multiplier=1.0,
     memory_update_multiplier=0.0,
+    baseline_accs=None,
     save_outputs=False,
 ):
     os.makedirs(output_dir, exist_ok=True)
@@ -89,7 +120,7 @@ def run_continual_experiment(
 
     train_times = []
     model_sizes = []
-    memory_sizes = []
+    buffer_sizes = []
 
     forward_backward_ops = []
     total_train_ops = []
@@ -102,7 +133,7 @@ def run_continual_experiment(
 
     for train_exp_id, train_exp in enumerate(benchmark.train_stream):
         print("=" * 70)
-        print(f"Training experience {train_exp_id}")
+        print(f"Training experience {train_exp_id + 1}/{n_experiences}")
         print("=" * 70)
 
         start_time = time.time()
@@ -115,11 +146,11 @@ def run_continual_experiment(
         replay_size = int(_extract_metric(last_metrics, "ReplaySizeMetric"))
 
         model_sizes.append(model_size)
-        memory_sizes.append(replay_size)
+        buffer_sizes.append(replay_size)
 
         train_size = len(train_exp.dataset)
 
-        baseline_ops, method_ops = estimate_ops(
+        fb_ops, method_ops = estimate_ops(
             train_size=train_size,
             model_size=model_size,
             replay_size=replay_size,
@@ -128,10 +159,10 @@ def run_continual_experiment(
             memory_update_multiplier=memory_update_multiplier,
         )
 
-        forward_backward_ops.append(baseline_ops)
+        forward_backward_ops.append(fb_ops)
         total_train_ops.append(method_ops)
 
-        print("Evaluating on full test stream for R matrix")
+        print("Evaluating on full test stream")
         eval_results = strategy.eval(benchmark.test_stream)
 
         result_matrix.update(
@@ -160,37 +191,38 @@ def run_continual_experiment(
 
     R = result_matrix.get()
 
-    dataset_memory_size = get_dataset_memory_size(benchmark)
+    lifetime_data_size = get_lifetime_data_size(benchmark)
 
     metrics = compute_summary_metrics(
         R=R,
         model=strategy.model,
         train_times=train_times,
         model_sizes=model_sizes,
-        memory_sizes=memory_sizes,
-        dataset_memory_size=dataset_memory_size,
+        buffer_sizes=buffer_sizes,
+        lifetime_data_size=lifetime_data_size,
         forward_backward_ops=forward_backward_ops,
         total_train_ops=total_train_ops,
+        baseline=baseline_accs,
     )
 
     if save_outputs:
         np.save(os.path.join(output_dir, "accuracy_matrix.npy"), R)
 
-        np.save(os.path.join(output_dir, "task_accs.npy"), np.array(task_accs))
-        np.save(os.path.join(output_dir, "growing_accs.npy"), np.array(growing_accs))
-        np.save(os.path.join(output_dir, "fixed_accs.npy"), np.array(fixed_accs))
+        np.save(os.path.join(output_dir, "task_accs.npy"), np.asarray(task_accs))
+        np.save(os.path.join(output_dir, "growing_accs.npy"), np.asarray(growing_accs))
+        np.save(os.path.join(output_dir, "fixed_accs.npy"), np.asarray(fixed_accs))
 
-        np.save(os.path.join(output_dir, "model_sizes.npy"), np.array(model_sizes))
-        np.save(os.path.join(output_dir, "memory_sizes.npy"), np.array(memory_sizes))
+        np.save(os.path.join(output_dir, "model_sizes.npy"), np.asarray(model_sizes))
+        np.save(os.path.join(output_dir, "buffer_sizes.npy"), np.asarray(buffer_sizes))
 
         np.save(
             os.path.join(output_dir, "forward_backward_ops.npy"),
-            np.array(forward_backward_ops),
+            np.asarray(forward_backward_ops),
         )
 
         np.save(
             os.path.join(output_dir, "total_train_ops.npy"),
-            np.array(total_train_ops),
+            np.asarray(total_train_ops),
         )
 
         with open(os.path.join(output_dir, "metrics.json"), "w") as f:
@@ -201,14 +233,17 @@ def run_continual_experiment(
         "metrics": metrics,
         "train_times": train_times,
         "model_sizes": model_sizes,
-        "memory_sizes": memory_sizes,
+        "buffer_sizes": buffer_sizes,
+        "memory_sizes": buffer_sizes,  # optional backward compatibility
         "forward_backward_ops": forward_backward_ops,
         "total_train_ops": total_train_ops,
-        "dataset_memory_size": dataset_memory_size,
+        "lifetime_data_size": lifetime_data_size,
+        "dataset_memory_size": lifetime_data_size,  # optional backward compatibility
         "test_sizes": test_sizes,
         "task_accs": task_accs,
         "growing_accs": growing_accs,
         "fixed_accs": fixed_accs,
+        "baseline_accs": baseline_accs,
     }
 
 
@@ -220,27 +255,25 @@ def run_joint_experiment(
 ):
     os.makedirs(output_dir, exist_ok=True)
 
-    start_time = time.time()
-
     print("=" * 70)
     print("Training JointTraining on full train stream")
     print("=" * 70)
 
+    start_time = time.time()
     strategy.train(benchmark.train_stream)
-
     train_time = time.time() - start_time
 
     print("Evaluating JointTraining on full test stream")
     eval_results = strategy.eval(benchmark.test_stream)
 
     last_metrics = strategy.evaluator.get_last_metrics()
-
     model_size = int(_extract_metric(last_metrics, "ModelSizeMetric"))
 
     stream_acc = None
+
     for key, value in eval_results.items():
         if "Top1_Acc_Stream" in key:
-            stream_acc = float(value)
+            stream_acc = _to_float(value)
             break
 
     if stream_acc is None:
@@ -252,9 +285,19 @@ def run_joint_experiment(
     growing_accs = [stream_acc] * n_experiences
     fixed_accs = [stream_acc] * n_experiences
 
-    train_times = [train_time] * n_experiences
+    train_times = [train_time]
     model_sizes = [model_size] * n_experiences
-    memory_sizes = [0] * n_experiences
+    buffer_sizes = [0] * n_experiences
+
+    lifetime_data_size = get_lifetime_data_size(benchmark)
+
+    forward_backward_ops = [
+        lifetime_data_size * model_size
+    ]
+
+    total_train_ops = [
+        lifetime_data_size * model_size
+    ]
 
     metrics = {
         "A Metric": stream_acc,
@@ -268,17 +311,29 @@ def run_joint_experiment(
         "MS (Memory Score)": 1.0,
         "SSS (Sample Storage Score)": 1.0,
         "CE (Compute Efficiency)": 1.0,
-        "Total Train Time": train_time,
-        "Average Train Time": train_time,
+        "Total Train Time": float(train_time),
+        "Average Train Time": float(train_time),
+        "Estimated Baseline Ops": float(np.sum(forward_backward_ops)),
+        "Estimated Total Ops": float(np.sum(total_train_ops)),
     }
 
     if save_outputs:
-        np.save(os.path.join(output_dir, "task_accs.npy"), np.array(task_accs))
-        np.save(os.path.join(output_dir, "growing_accs.npy"), np.array(growing_accs))
-        np.save(os.path.join(output_dir, "fixed_accs.npy"), np.array(fixed_accs))
+        np.save(os.path.join(output_dir, "task_accs.npy"), np.asarray(task_accs))
+        np.save(os.path.join(output_dir, "growing_accs.npy"), np.asarray(growing_accs))
+        np.save(os.path.join(output_dir, "fixed_accs.npy"), np.asarray(fixed_accs))
 
-        np.save(os.path.join(output_dir, "model_sizes.npy"), np.array(model_sizes))
-        np.save(os.path.join(output_dir, "memory_sizes.npy"), np.array(memory_sizes))
+        np.save(os.path.join(output_dir, "model_sizes.npy"), np.asarray(model_sizes))
+        np.save(os.path.join(output_dir, "buffer_sizes.npy"), np.asarray(buffer_sizes))
+
+        np.save(
+            os.path.join(output_dir, "forward_backward_ops.npy"),
+            np.asarray(forward_backward_ops),
+        )
+
+        np.save(
+            os.path.join(output_dir, "total_train_ops.npy"),
+            np.asarray(total_train_ops),
+        )
 
         with open(os.path.join(output_dir, "metrics.json"), "w") as f:
             json.dump(metrics, f, indent=4)
@@ -288,7 +343,12 @@ def run_joint_experiment(
         "metrics": metrics,
         "train_times": train_times,
         "model_sizes": model_sizes,
-        "memory_sizes": memory_sizes,
+        "buffer_sizes": buffer_sizes,
+        "memory_sizes": buffer_sizes,
+        "forward_backward_ops": forward_backward_ops,
+        "total_train_ops": total_train_ops,
+        "lifetime_data_size": lifetime_data_size,
+        "dataset_memory_size": lifetime_data_size,
         "task_accs": task_accs,
         "growing_accs": growing_accs,
         "fixed_accs": fixed_accs,

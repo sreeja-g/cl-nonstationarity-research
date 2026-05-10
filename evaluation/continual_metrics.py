@@ -3,21 +3,21 @@ import numpy as np
 
 def A(R):
     """
-    Final Average Accuracy.
+    Final Average Accuracy across all tasks.
 
     A = average accuracy after learning all experiences.
     Uses final row of R.
     """
 
     final_row = R[-1, :]
-    values = [v for v in final_row if not np.isnan(v)]
+    values = final_row[~np.isnan(final_row)]
 
-    return float(np.mean(values)) if values else np.nan
+    return float(np.mean(values)) if values.size > 0 else np.nan
 
 
 def ACC(R):
     """
-    Accuracy over time.
+    Average Continual Accuracy.
 
     ACC = average of lower-triangle entries R[i, j], where i >= j.
     Measures performance throughout continual learning.
@@ -36,29 +36,38 @@ def ACC(R):
 
 def BWT(R):
     """
-    Backward Transfer.
+    Backward Transfer (BWT)
 
-    BWT = average of R[i, j] - R[j, j] for i > j.
-    Negative BWT means forgetting.
-    Positive BWT means later learning helped earlier tasks.
+    R[i, j] = performance on task j after learning task i
+
+    BWT compares:
+        final performance on old tasks
+        vs
+        performance immediately after learning them
+
+    Negative -> forgetting
+    Positive -> positive backward transfer
     """
 
     N = R.shape[0]
     values = []
 
-    for i in range(1, N):
-        for j in range(i):
-            if not np.isnan(R[i, j]) and not np.isnan(R[j, j]):
-                values.append(R[i, j] - R[j, j])
+    final_row = N - 1
+
+    for j in range(N - 1):
+        if not np.isnan(R[final_row, j]) and not np.isnan(R[j, j]):
+            values.append(R[final_row, j] - R[j, j])
 
     return float(np.mean(values)) if values else np.nan
 
 
 def BWT_plus(R):
     """
-    Positive Backward Transfer.
+    Positive Backward Transfer (BWT+)
 
     BWT+ = max(BWT, 0)
+
+    Measures beneficial backward transfer only.
     """
 
     bwt = BWT(R)
@@ -69,49 +78,77 @@ def BWT_plus(R):
     return float(max(bwt, 0.0))
 
 
-def FWT(R):
+def FWT(R, baseline=None):
     """
-    Forward Transfer.
+    Forward Transfer (FWT)
 
-    FWT = average of upper-triangle entries R[i, j], where i < j.
+    R[i, j] = performance on task j after learning task i
 
-    Requires fixed evaluation protocol because future-task values are needed.
+    FWT for task j:
+        R[j-1, j] - baseline[j]
+
+    baseline[j]:
+        performance on task j before learning anything
+        random-init / untrained model performance
     """
 
     N = R.shape[0]
     values = []
 
-    for i in range(N):
-        for j in range(i + 1, N):
-            if not np.isnan(R[i, j]):
-                values.append(R[i, j])
+    if baseline is None:
+        baseline = np.zeros(N)
+
+    baseline = np.asarray(baseline, dtype=float)
+
+    if baseline.size != N:
+        raise ValueError("baseline must have one value per task")
+
+    for j in range(1, N):
+        if not np.isnan(R[j - 1, j]) and not np.isnan(baseline[j]):
+            values.append(R[j - 1, j] - baseline[j])
 
     return float(np.mean(values)) if values else np.nan
 
 
 def forgetting(R):
     """
-    Forgetting.
+    Forgetting (FG)
 
-    Forgetting = |min(BWT, 0)|
+    Standard forgetting:
+        average drop from best past performance
+        to final performance.
 
-    If BWT is positive, forgetting is 0.
+    FG_j = max_k(R[k, j]) - R[N-1, j]
     """
 
-    bwt = BWT(R)
+    N = R.shape[0]
+    values = []
 
-    if np.isnan(bwt):
-        return np.nan
+    final_row = N - 1
 
-    return float(abs(min(bwt, 0.0)))
+    for j in range(N - 1):
+        past_scores = R[j:final_row + 1, j]
+        past_scores = past_scores[~np.isnan(past_scores)]
+
+        if past_scores.size == 0:
+            continue
+
+        best_score = np.max(past_scores)
+        final_score = R[final_row, j]
+
+        if not np.isnan(final_score):
+            values.append(best_score - final_score)
+
+    return float(np.mean(values)) if values else np.nan
 
 
 def REM(R):
     """
-    Remembering score.
+    Remembering Score (REM)
 
-    REM = 1 - |min(BWT, 0)|
     REM = 1 - Forgetting
+
+    Higher is better.
     """
 
     fg = forgetting(R)
@@ -124,7 +161,9 @@ def REM(R):
 
 def M(model):
     """
-    Raw model size: total number of parameters.
+    Raw model size.
+
+    Returns total number of trainable and non-trainable parameters.
     """
 
     return int(sum(p.numel() for p in model.parameters()))
@@ -132,64 +171,93 @@ def M(model):
 
 def memory_score(model_sizes):
     """
-    MS = min(1, mean(M_1 / M_i))
+    Memory Score (MS)
+
+    MS = min(1, average(M_1 / M_i))
+
+    M_1:
+        baseline model size
+
+    M_i:
+        model size during continual learning
+
+    Higher is better:
+        1 -> no model growth
+        lower values -> larger model memory overhead
     """
 
-    model_sizes = np.array(model_sizes, dtype=float)
+    model_sizes = np.asarray(model_sizes, dtype=float)
 
-    if len(model_sizes) == 0:
+    if model_sizes.size == 0:
         return np.nan
+
+    if np.any(model_sizes <= 0):
+        raise ValueError("model_sizes must be positive")
 
     first_size = model_sizes[0]
-
-    if first_size <= 0:
-        return np.nan
-
     ratios = first_size / model_sizes
 
     return float(min(1.0, np.mean(ratios)))
 
 
-def sample_storage_score(memory_sizes, dataset_memory_size):
+def sample_storage_score(buffer_sizes, lifetime_data_size):
     """
-    SSS = 1 - min(1, mean(memory_i / dataset_memory_size))
+    Sample Storage Score (SSS)
+
+    SSS = 1 - min(1, average(buffer_i / lifetime_data_size))
+
+    Higher is better:
+        1 -> minimal replay storage
+        0 -> replay storage equals/exceeds lifetime dataset size
     """
 
-    memory_sizes = np.array(memory_sizes, dtype=float)
+    buffer_sizes = np.asarray(buffer_sizes, dtype=float)
 
-    if len(memory_sizes) == 0:
+    if buffer_sizes.size == 0:
         return np.nan
 
-    if dataset_memory_size is None or dataset_memory_size <= 0:
+    if lifetime_data_size is None or lifetime_data_size <= 0:
         return np.nan
 
-    ratio = np.mean(memory_sizes / dataset_memory_size)
+    if np.any(buffer_sizes < 0):
+        raise ValueError("buffer_sizes must be non-negative")
+
+    ratio = np.mean(buffer_sizes) / float(lifetime_data_size)
 
     return float(1.0 - min(1.0, ratio))
 
 
 def compute_efficiency_from_ops(forward_backward_ops, total_train_ops):
     """
-    CE = min(1, mean(forward_backward_ops_i / total_train_ops_i))
+    Compute Efficiency (CE)
+
+    CE = min(1, average(forward_backward_ops_i / total_train_ops_i))
 
     forward_backward_ops_i:
-        estimated normal forward-backward cost
+        standard forward-backward training cost
 
     total_train_ops_i:
-        estimated full method cost including replay, routing,
-        regularization, memory update, etc.
+        total method cost including replay, routing,
+        regularization, memory updates, etc.
+
+    Higher is better:
+        1 -> no additional overhead
+        lower values -> higher computational overhead
     """
 
-    forward_backward_ops = np.array(forward_backward_ops, dtype=float)
-    total_train_ops = np.array(total_train_ops, dtype=float)
+    forward_backward_ops = np.asarray(forward_backward_ops, dtype=float)
+    total_train_ops = np.asarray(total_train_ops, dtype=float)
 
-    if len(forward_backward_ops) == 0:
+    if forward_backward_ops.size == 0:
         return np.nan
 
-    if len(forward_backward_ops) != len(total_train_ops):
+    if forward_backward_ops.size != total_train_ops.size:
         raise ValueError(
             "forward_backward_ops and total_train_ops must have same length"
         )
+
+    if np.any(forward_backward_ops < 0):
+        raise ValueError("forward_backward_ops must be non-negative")
 
     if np.any(total_train_ops <= 0):
         raise ValueError("total_train_ops must be positive")
@@ -204,19 +272,26 @@ def compute_summary_metrics(
     model,
     train_times,
     model_sizes,
-    memory_sizes,
-    dataset_memory_size,
+    buffer_sizes,
+    lifetime_data_size,
     forward_backward_ops,
     total_train_ops,
+    baseline=None,
 ):
+    """
+    Compute all summary metrics for continual learning experiments.
+    """
+
+    R = np.asarray(R, dtype=float)
+
     if len(train_times) != R.shape[0]:
         raise ValueError("train_times must have one value per experience")
 
     if len(model_sizes) != R.shape[0]:
         raise ValueError("model_sizes must have one value per experience")
 
-    if len(memory_sizes) != R.shape[0]:
-        raise ValueError("memory_sizes must have one value per experience")
+    if len(buffer_sizes) != R.shape[0]:
+        raise ValueError("buffer_sizes must have one value per experience")
 
     if len(forward_backward_ops) != R.shape[0]:
         raise ValueError("forward_backward_ops must have one value per experience")
@@ -230,13 +305,13 @@ def compute_summary_metrics(
         "Model Size": M(model),
         "BWT (Backward Transfer)": BWT(R),
         "BWT+ (Positive Backward Transfer)": BWT_plus(R),
-        "FWT (Forward Transfer)": FWT(R),
+        "FWT (Forward Transfer)": FWT(R, baseline),
         "Forgetting": forgetting(R),
         "REM (Remembering)": REM(R),
         "MS (Memory Score)": memory_score(model_sizes),
         "SSS (Sample Storage Score)": sample_storage_score(
-            memory_sizes,
-            dataset_memory_size,
+            buffer_sizes,
+            lifetime_data_size,
         ),
         "CE (Compute Efficiency)": compute_efficiency_from_ops(
             forward_backward_ops,
