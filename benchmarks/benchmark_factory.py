@@ -1,4 +1,8 @@
-from avalanche.benchmarks.classic import SplitMNIST, SplitCIFAR10
+from avalanche.benchmarks.classic import (
+    SplitMNIST,
+    SplitCIFAR10,
+    PermutedMNIST,
+)
 
 
 def build_benchmark(
@@ -7,7 +11,7 @@ def build_benchmark(
     seed: int = 1234,
     return_task_id: bool = False,
 ):
-    benchmark_name = benchmark_name.lower()
+    benchmark_name = benchmark_name.lower().strip()
 
     if benchmark_name == "split_mnist":
         return SplitMNIST(
@@ -18,6 +22,13 @@ def build_benchmark(
 
     if benchmark_name == "split_cifar10":
         return SplitCIFAR10(
+            n_experiences=n_experiences,
+            seed=seed,
+            return_task_id=return_task_id,
+        )
+
+    if benchmark_name == "permuted_mnist":
+        return PermutedMNIST(
             n_experiences=n_experiences,
             seed=seed,
             return_task_id=return_task_id,
