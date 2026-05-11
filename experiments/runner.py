@@ -60,26 +60,34 @@ def estimate_ops(
     regularization_overhead=0.0,
     routing_overhead=0.0,
     memory_update_overhead=0.0,
+    regularization_multiplier=None,
+    routing_multiplier=None,
+    memory_update_multiplier=None,
 ):
     """
-    Estimates relative training compute.
+    Estimate relative training compute.
 
-    forward_backward_ops:
-        baseline SGD compute
+    Supports both old names:
+        regularization_multiplier, routing_multiplier, memory_update_multiplier
 
-    total_train_ops:
-        baseline + replay + additional continual learning overheads
+    and new names:
+        regularization_overhead, routing_overhead, memory_update_overhead
     """
 
-    # Standard SGD cost
+    if regularization_multiplier is not None:
+        regularization_overhead = regularization_multiplier - 1.0
+
+    if routing_multiplier is not None:
+        routing_overhead = routing_multiplier - 1.0
+
+    if memory_update_multiplier is not None:
+        memory_update_overhead = memory_update_multiplier
+
     forward_backward_ops = train_size * model_size
 
-    # Replay increases effective batch processing
     effective_train_size = train_size + replay_size
 
-    base_training_cost = (
-        effective_train_size * model_size
-    )
+    base_training_cost = effective_train_size * model_size
 
     overhead_multiplier = (
         1.0
@@ -87,9 +95,7 @@ def estimate_ops(
         + routing_overhead
     )
 
-    total_train_ops = (
-        base_training_cost * overhead_multiplier
-    )
+    total_train_ops = base_training_cost * overhead_multiplier
 
     total_train_ops += (
         memory_update_overhead
@@ -97,10 +103,7 @@ def estimate_ops(
         * model_size
     )
 
-    return (
-        float(forward_backward_ops),
-        float(total_train_ops),
-    )
+    return float(forward_backward_ops), float(total_train_ops)
 
 
 def run_continual_experiment(

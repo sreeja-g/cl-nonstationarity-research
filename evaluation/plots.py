@@ -149,33 +149,32 @@ def plot_three_protocols(task_accs, growing_accs, fixed_accs):
 def plot_metric_comparison(
     all_results,
     metric_names=None,
-    title="Summary Metrics Heatmap",
+    title="Summary Metric Comparison",
 ):
     if metric_names is None:
-        metric_names = [
-            "A Metric",
-            "ACC Metric",
-            "BWT (Backward Transfer)",
-            "BWT+ (Positive Backward Transfer)",
-            "FWT (Forward Transfer)",
-            "Forgetting",
-            "REM (Remembering)",
-            "MS (Memory Score)",
-            "SSS (Sample Storage Score)",
-            "CE (Compute Efficiency)",
-        ]
+        metric_names = {
+            "A Metric": "A ↑",
+            "ACC Metric": "ACC ↑",
+            "BWT (Backward Transfer)": "BWT ↑",
+            "BWT+ (Positive Backward Transfer)": "BWT+ ↑",
+            "FWT (Forward Transfer)": "FWT ↑",
+            "Forgetting": "FGT ↓",
+            "REM (Remembering)": "REM ↑",
+            "MS (Memory Score)": "MS ↑",
+            "SSS (Sample Storage Score)": "SSS ↑",
+            "CE (Compute Efficiency)": "CE ↑",
+        }
 
-    short_labels = {
-        "A Metric": "A",
-        "ACC Metric": "ACC",
-        "BWT (Backward Transfer)": "BWT",
-        "BWT+ (Positive Backward Transfer)": "BWT+",
-        "FWT (Forward Transfer)": "FWT",
-        "Forgetting": "FGT",
-        "REM (Remembering)": "REM",
-        "MS (Memory Score)": "MS",
-        "SSS (Sample Storage Score)": "SSS",
-        "CE (Compute Efficiency)": "CE",
+    if isinstance(metric_names, dict):
+        metric_keys = list(metric_names.keys())
+        labels = list(metric_names.values())
+    else:
+        metric_keys = metric_names
+        labels = metric_names
+
+    # Metrics where lower is better
+    lower_is_better = {
+        "Forgetting",
     }
 
     methods = list(all_results.keys())
@@ -186,22 +185,31 @@ def plot_metric_comparison(
                 all_results[m]["metrics"].get(metric, np.nan)
                 for m in methods
             ]
-            for metric in metric_names
+            for metric in metric_keys
         ],
         dtype=float,
     )
 
     display = raw.copy()
 
+    # Convert 0-1 range metrics to percentages
     for i in range(display.shape[0]):
         valid = display[i][~np.isnan(display[i])]
 
-        if valid.size > 0 and np.nanmax(np.abs(valid)) <= 1.0:
+        if (
+            valid.size > 0
+            and np.nanmax(np.abs(valid)) <= 1.0
+        ):
             display[i] *= 100
 
-    normalized = np.full_like(display, np.nan, dtype=float)
+    # Row-wise normalization
+    normalized = np.full_like(
+        display,
+        np.nan,
+        dtype=float,
+    )
 
-    for i in range(display.shape[0]):
+    for i, metric in enumerate(metric_keys):
         row = display[i]
         valid = row[~np.isnan(row)]
 
@@ -214,34 +222,82 @@ def plot_metric_comparison(
         if max_val == min_val:
             normalized[i] = 0.5
         else:
-            normalized[i] = (row - min_val) / (max_val - min_val)
+            normalized[i] = (
+                (row - min_val)
+                / (max_val - min_val)
+            )
 
-        if metric_names[i] == "Forgetting":
+        # Lower forgetting is better
+        if metric in lower_is_better:
             normalized[i] = 1.0 - normalized[i]
 
-    fig, ax = plt.subplots(figsize=(11, 6))
+    fig, ax = plt.subplots(figsize=(12, 6))
+
+    masked = np.ma.masked_invalid(normalized)
+
+    cmap = plt.cm.RdYlGn.copy()
+    cmap.set_bad(color="#F0F0F0")
 
     im = ax.imshow(
-        normalized,
+        masked,
         aspect="auto",
         vmin=0,
         vmax=1,
+        cmap=cmap,
     )
 
     ax.set_xticks(np.arange(len(methods)))
-    ax.set_yticks(np.arange(len(metric_names)))
+    ax.set_yticks(np.arange(len(metric_keys)))
 
-    ax.set_xticklabels(methods, rotation=30, ha="right")
-    ax.set_yticklabels([short_labels.get(m, m) for m in metric_names])
+    ax.set_xticklabels(
+        methods,
+        rotation=25,
+        ha="right",
+        fontsize=10,
+    )
 
-    ax.set_title(title)
-    ax.set_xlabel("Approaches")
-    ax.set_ylabel("Metrics")
+    ax.set_yticklabels(
+        labels,
+        fontsize=10,
+    )
 
-    for i in range(len(metric_names)):
+    ax.set_title(
+        title,
+        fontsize=14,
+        fontweight="bold",
+        pad=12,
+    )
+
+    ax.set_xlabel(
+        "Approaches",
+        fontsize=11,
+        fontweight="bold",
+    )
+
+    ax.set_ylabel(
+        "Metrics",
+        fontsize=11,
+        fontweight="bold",
+    )
+
+    # Add values inside cells
+    for i in range(len(metric_keys)):
         for j in range(len(methods)):
             value = display[i, j]
-            text = "nan" if np.isnan(value) else f"{value:.2f}"
+            score = normalized[i, j]
+
+            text = (
+                "nan"
+                if np.isnan(value)
+                else f"{value:.2f}"
+            )
+
+            if np.isnan(score):
+                text_color = "black"
+            elif score > 0.75:
+                text_color = "white"
+            else:
+                text_color = "black"
 
             ax.text(
                 j,
@@ -250,14 +306,20 @@ def plot_metric_comparison(
                 ha="center",
                 va="center",
                 fontsize=9,
+                color=text_color,
+                fontweight="bold",
             )
 
     cbar = plt.colorbar(im, ax=ax)
-    cbar.set_label("Relative Performance")
+
+    cbar.set_label(
+        "Relative Metric Performance",
+        fontsize=10,
+        fontweight="bold",
+    )
 
     plt.tight_layout()
     plt.show()
-
 
 def plot_fixed_comparison(all_results):
     plt.figure(figsize=(8, 5))
