@@ -15,13 +15,15 @@ def _to_float(value):
     return float(value)
 
 
-def _extract_metric(last_metrics, metric_name):
+def _extract_metric(last_metrics, metric_name, default=None):
     matches = [
         v for k, v in last_metrics.items()
         if metric_name in k
     ]
 
     if len(matches) == 0:
+        if default is not None:
+            return default
         raise KeyError(f"Could not find metric: {metric_name}")
 
     return _to_float(matches[-1])
@@ -52,11 +54,42 @@ def weighted_mean_accuracy(accs, sizes):
 
     return float(np.sum(accs * sizes) / np.sum(sizes))
 
+def _get_strategy_attr(strategy, name, default=None):
+    """
+    Safely get attributes from Avalanche strategy.
 
+    Some versions expose train_epochs/train_mb_size directly.
+    Others may not, so we use a safe fallback.
+    """
+
+    return getattr(strategy, name, default)
+
+def get_replay_mb_size(strategy):
+    """
+    Estimate replay minibatch size from ReplayPlugin.
+
+    Avalanche ReplayPlugin commonly uses batch_size_mem.
+    If no replay plugin exists, return 0.
+    """
+
+    plugins = getattr(strategy, "plugins", [])
+
+    for plugin in plugins:
+        if hasattr(plugin, "batch_size_mem"):
+            value = getattr(plugin, "batch_size_mem")
+
+            if value is not None:
+                return int(value)
+
+    return 0
+    
 def estimate_ops(
     train_size,
     model_size,
+    train_epochs=1,
+    train_mb_size=64,
     replay_size=0,
+    replay_mb_size=0,
     regularization_overhead=0.0,
     routing_overhead=0.0,
     memory_update_overhead=0.0,
@@ -67,12 +100,40 @@ def estimate_ops(
     """
     Estimate relative training compute.
 
-    Supports both old names:
-        regularization_multiplier, routing_multiplier, memory_update_multiplier
+    Baseline compute:
+        train_size * model_size * train_epochs
 
-    and new names:
-        regularization_overhead, routing_overhead, memory_update_overhead
+    Method compute:
+        includes normal training, replay samples actually used,
+        regularization overhead, routing overhead, and memory update overhead.
+
+    Notes:
+    - replay_size is the stored replay buffer size.
+    - replay_mb_size is the number of memory samples replayed per minibatch.
+    - replay compute is estimated from minibatches, not total buffer size.
     """
+
+    if train_epochs <= 0:
+        raise ValueError("train_epochs must be positive")
+
+    if train_mb_size <= 0:
+        raise ValueError("train_mb_size must be positive")
+
+    if model_size <= 0:
+        raise ValueError("model_size must be positive")
+
+    if train_size < 0:
+        raise ValueError("train_size must be non-negative")
+
+    if replay_size < 0:
+        raise ValueError("replay_size must be non-negative")
+
+    if replay_mb_size < 0:
+        raise ValueError("replay_mb_size must be non-negative")
+
+    # --------------------------------------------------
+    # Backward compatibility with old multiplier names
+    # --------------------------------------------------
 
     if regularization_multiplier is not None:
         regularization_overhead = regularization_multiplier - 1.0
@@ -83,11 +144,41 @@ def estimate_ops(
     if memory_update_multiplier is not None:
         memory_update_overhead = memory_update_multiplier
 
-    forward_backward_ops = train_size * model_size
+    # --------------------------------------------------
+    # Baseline forward-backward compute
+    # --------------------------------------------------
 
-    effective_train_size = train_size + replay_size
+    forward_backward_ops = (
+        train_size
+        * model_size
+        * train_epochs
+    )
 
-    base_training_cost = effective_train_size * model_size
+    # --------------------------------------------------
+    # Estimate replay samples actually used
+    # --------------------------------------------------
+
+    num_minibatches = int(np.ceil(train_size / train_mb_size))
+
+    replay_samples_per_epoch = min(
+        replay_size,
+        num_minibatches * replay_mb_size,
+    )
+
+    replay_samples_total = replay_samples_per_epoch * train_epochs
+
+    normal_samples_total = train_size * train_epochs
+
+    effective_train_samples = (
+        normal_samples_total
+        + replay_samples_total
+    )
+
+    # --------------------------------------------------
+    # Method compute
+    # --------------------------------------------------
+
+    base_training_cost = effective_train_samples * model_size
 
     overhead_multiplier = (
         1.0
@@ -97,10 +188,12 @@ def estimate_ops(
 
     total_train_ops = base_training_cost * overhead_multiplier
 
+    # Memory update cost, such as buffer update, routing update, prototype update
     total_train_ops += (
         memory_update_overhead
         * train_size
         * model_size
+        * train_epochs
     )
 
     return float(forward_backward_ops), float(total_train_ops)
@@ -133,7 +226,11 @@ def run_continual_experiment(
     fixed_accs = []
 
     test_sizes = get_test_experience_sizes(benchmark)
-
+    
+    train_epochs = int(_get_strategy_attr(strategy, "train_epochs", 1))
+    train_mb_size = int(_get_strategy_attr(strategy, "train_mb_size", 64))
+    replay_mb_size = get_replay_mb_size(strategy)
+    
     for train_exp_id, train_exp in enumerate(benchmark.train_stream):
         print("=" * 70)
         print(f"Training experience {train_exp_id + 1}/{n_experiences}")
@@ -146,7 +243,7 @@ def run_continual_experiment(
         last_metrics = strategy.evaluator.get_last_metrics()
 
         model_size = int(_extract_metric(last_metrics, "ModelSizeMetric"))
-        replay_size = int(_extract_metric(last_metrics, "ReplaySizeMetric"))
+        replay_size = int(_extract_metric(last_metrics, "ReplaySizeMetric", default=0))
 
         model_sizes.append(model_size)
         buffer_sizes.append(replay_size)
@@ -156,7 +253,10 @@ def run_continual_experiment(
         fb_ops, method_ops = estimate_ops(
             train_size=train_size,
             model_size=model_size,
+            train_epochs=train_epochs,
+            train_mb_size=train_mb_size,
             replay_size=replay_size,
+            replay_mb_size=replay_mb_size,
             regularization_multiplier=regularization_multiplier,
             routing_multiplier=routing_multiplier,
             memory_update_multiplier=memory_update_multiplier,
@@ -284,8 +384,8 @@ def run_joint_experiment(
 
     n_experiences = len(benchmark.test_stream)
 
-    task_accs = [stream_acc] * n_experiences
-    growing_accs = [stream_acc] * n_experiences
+    task_accs = [np.nan] * n_experiences
+    growing_accs = [np.nan] * n_experiences
     fixed_accs = [stream_acc] * n_experiences
 
     train_times = [train_time]
@@ -294,12 +394,14 @@ def run_joint_experiment(
 
     lifetime_data_size = get_lifetime_data_size(benchmark)
 
+    train_epochs = int(_get_strategy_attr(strategy, "train_epochs", 1))
+    
     forward_backward_ops = [
-        lifetime_data_size * model_size
+        lifetime_data_size * model_size * train_epochs
     ]
-
+    
     total_train_ops = [
-        lifetime_data_size * model_size
+        lifetime_data_size * model_size * train_epochs
     ]
 
     metrics = {

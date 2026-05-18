@@ -5,12 +5,60 @@ import json
 import itertools
 import numpy as np
 
-from hds_cl.benchmarks.benchmark_factory import build_benchmark
-from hds_cl.models.model_factory import build_model
-from hds_cl.evaluation.evaluator_factory import build_evaluator
-from hds_cl.strategies.strategy_factory import build_strategy
-from hds_cl.experiments.runner import run_continual_experiment
-from hds_cl.utils.seed import set_seed
+from benchmarks.benchmark_factory import build_benchmark
+from models.model_factory import build_model
+from evaluation.evaluator_factory import build_evaluator
+from strategies.strategy_factory import build_strategy
+from experiments.runner import run_continual_experiment
+from utils.seed import set_seed
+
+
+# -------------------------------------------------------
+# Config splitting
+# -------------------------------------------------------
+
+EXPERIMENT_CONFIG_KEYS = {
+    "regularization_multiplier",
+    "routing_multiplier",
+    "memory_update_multiplier",
+    "regularization_overhead",
+    "routing_overhead",
+    "memory_update_overhead",
+    "baseline_accs",
+}
+
+
+def split_config(config):
+    """
+    Split a hyperparameter config into:
+
+    1. strategy_config:
+       Parameters used to build the Avalanche strategy.
+       Example:
+           lr, train_mb_size, train_epochs, optimizer_name,
+           plugin_names, ewc_lambda, mem_size, batch_size_mem
+
+    2. experiment_config:
+       Parameters used by run_continual_experiment.
+       Example:
+           regularization_multiplier,
+           routing_multiplier,
+           memory_update_multiplier
+
+    This is important because compute-efficiency multipliers should not
+    be passed to build_strategy. They must be passed to run_continual_experiment.
+    """
+
+    strategy_config = {}
+    experiment_config = {}
+
+    for key, value in config.items():
+        if key in EXPERIMENT_CONFIG_KEYS:
+            experiment_config[key] = value
+        else:
+            strategy_config[key] = value
+
+    return strategy_config, experiment_config
 
 
 def make_grid(search_space):
@@ -21,6 +69,37 @@ def make_grid(search_space):
         dict(zip(keys, combination))
         for combination in itertools.product(*values)
     ]
+
+
+def convert_to_json_safe(obj):
+    """
+    Make objects safe for json.dump.
+
+    Handles:
+    - numpy scalars
+    - numpy arrays
+    - nested dicts/lists/tuples
+    """
+
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+
+    if isinstance(obj, np.generic):
+        return obj.item()
+
+    if isinstance(obj, dict):
+        return {
+            key: convert_to_json_safe(value)
+            for key, value in obj.items()
+        }
+
+    if isinstance(obj, list):
+        return [convert_to_json_safe(value) for value in obj]
+
+    if isinstance(obj, tuple):
+        return [convert_to_json_safe(value) for value in obj]
+
+    return obj
 
 
 def run_single_config(
@@ -37,6 +116,8 @@ def run_single_config(
 ):
     if model_kwargs is None:
         model_kwargs = {}
+
+    strategy_config, experiment_config = split_config(config)
 
     set_seed(seed)
 
@@ -65,7 +146,7 @@ def run_single_config(
         strategy_name=strategy_name,
         model=model,
         evaluator=evaluator,
-        **config,
+        **strategy_config,
     )
 
     result = run_continual_experiment(
@@ -73,6 +154,7 @@ def run_single_config(
         benchmark=benchmark,
         output_dir=output_dir,
         save_outputs=save_outputs,
+        **experiment_config,
     )
 
     return result
@@ -106,7 +188,17 @@ def grid_search(
         print("\n" + "#" * 80)
         print(f"Grid Search | Approach: {approach_name}")
         print(f"Config {run_id + 1}/{len(configs)}")
+        print("Full config:")
         print(config)
+
+        strategy_config, experiment_config = split_config(config)
+
+        print("Strategy config:")
+        print(strategy_config)
+
+        print("Experiment config:")
+        print(experiment_config)
+
         print("#" * 80)
 
         result = run_single_config(
@@ -129,6 +221,8 @@ def grid_search(
                 "run_id": run_id,
                 "approach_name": approach_name,
                 "config": config,
+                "strategy_config": strategy_config,
+                "experiment_config": experiment_config,
                 "score_key": score_key,
                 "score": float(score),
                 "metrics": result["metrics"],
@@ -140,17 +234,19 @@ def grid_search(
         key=lambda x: x["score"],
     )
 
+    summary = {
+        "approach_name": approach_name,
+        "score_key": score_key,
+        "best_result": best_result,
+        "all_results": all_results,
+    }
+
     with open(
         os.path.join(search_output_root, "grid_search_summary.json"),
         "w",
     ) as f:
         json.dump(
-            {
-                "approach_name": approach_name,
-                "score_key": score_key,
-                "best_result": best_result,
-                "all_results": all_results,
-            },
+            convert_to_json_safe(summary),
             f,
             indent=4,
         )
@@ -185,7 +281,17 @@ def run_repeated_evaluation(
         print("\n" + "=" * 80)
         print(f"Repeated Evaluation | Approach: {approach_name}")
         print(f"Seed {seed} | Run {run_id + 1}/{len(seeds)}")
+        print("Best config:")
         print(best_config)
+
+        strategy_config, experiment_config = split_config(best_config)
+
+        print("Strategy config:")
+        print(strategy_config)
+
+        print("Experiment config:")
+        print(experiment_config)
+
         print("=" * 80)
 
         result = run_single_config(
@@ -207,6 +313,8 @@ def run_repeated_evaluation(
                 "seed": seed,
                 "approach_name": approach_name,
                 "config": best_config,
+                "strategy_config": strategy_config,
+                "experiment_config": experiment_config,
                 "score_key": score_key,
                 "score": float(result["metrics"][score_key]),
                 "metrics": result["metrics"],
@@ -234,7 +342,11 @@ def run_repeated_evaluation(
         os.path.join(final_output_root, "repeated_evaluation_summary.json"),
         "w",
     ) as f:
-        json.dump(summary, f, indent=4)
+        json.dump(
+            convert_to_json_safe(summary),
+            f,
+            indent=4,
+        )
 
     return summary, final_results
 

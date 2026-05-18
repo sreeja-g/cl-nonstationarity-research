@@ -96,7 +96,7 @@ def FWT(R, baseline=None):
     values = []
 
     if baseline is None:
-        baseline = np.zeros(N)
+        return np.nan
 
     baseline = np.asarray(baseline, dtype=float)
 
@@ -222,7 +222,8 @@ def sample_storage_score(buffer_sizes, lifetime_data_size):
     if np.any(buffer_sizes < 0):
         raise ValueError("buffer_sizes must be non-negative")
 
-    ratio = np.mean(buffer_sizes) / float(lifetime_data_size)
+    #ratio = np.mean(buffer_sizes) / float(lifetime_data_size)
+    ratio = np.max(buffer_sizes) / lifetime_data_size
 
     return float(1.0 - min(1.0, ratio))
 
