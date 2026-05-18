@@ -159,11 +159,12 @@ def estimate_ops(
     # --------------------------------------------------
 
     num_minibatches = int(np.ceil(train_size / train_mb_size))
-
-    replay_samples_per_epoch = min(
-        replay_size,
-        num_minibatches * replay_mb_size,
-    )
+    
+    if replay_size > 0 and replay_mb_size > 0:
+        replay_samples_per_minibatch = min(replay_size, replay_mb_size)
+        replay_samples_per_epoch = num_minibatches * replay_samples_per_minibatch
+    else:
+        replay_samples_per_epoch = 0
 
     replay_samples_total = replay_samples_per_epoch * train_epochs
 
