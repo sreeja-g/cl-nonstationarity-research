@@ -1,0 +1,4 @@
+# @package paths
+# Copy to configs/paths/local.yaml (git-ignored) and select with `paths=local`.
+data_dir: D:/clns/data
+output_dir: D:/clns/outputs

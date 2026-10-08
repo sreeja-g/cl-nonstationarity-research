@@ -1,0 +1,5 @@
+name: er
+# TBD (tune on held-out experiences)
+mem_size: 2000
+storage: reservoir    # reservoir | class_balanced (class_balanced warns under domain_il)
+batch_size_mem: null  # null -> Avalanche default

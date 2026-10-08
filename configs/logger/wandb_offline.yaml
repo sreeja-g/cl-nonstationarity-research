@@ -1,0 +1,6 @@
+name: wandb
+project: clns-nonstationarity
+entity: null
+group: ${benchmark.name}/${model.name}/${method.name}
+tags: []
+mode: offline                        # sync later with `wandb sync <run_dir>/wandb/offline-run-*`

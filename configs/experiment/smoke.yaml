@@ -1,0 +1,30 @@
+# @package _global_
+# Tiny end-to-end run on the in-memory synthetic benchmark (no data download).
+#   python -m clns.train experiment=smoke                       # logger none
+#   python -m clns.train experiment=smoke logger=wandb_offline
+defaults:
+  - override /benchmark: synthetic
+  - override /method: naive
+  - override /model: resnet18
+  - override /logger: none
+
+device: auto
+
+# Smoke runs never share run directories with real runs (the run-dir path does not encode
+# protocol/hyper-parameters; the config fingerprint would refuse a mismatch with exit 4 anyway).
+paths:
+  output_dir: ${oc.env:CLNS_OUTPUT_DIR,/workspace/outputs}/smoke
+
+benchmark:
+  max_experiences: 2
+  train_per_class: 8
+  test_per_class: 4
+
+model:
+  cifar_stem: true           # 32x32 inputs
+
+train:
+  epochs: 1
+  mb_size: 8
+  eval_mb_size: 16
+  num_workers: 0

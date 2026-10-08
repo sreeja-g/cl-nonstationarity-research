@@ -1,0 +1,63 @@
+# Root config for `python -m clns.train` (src/clns/train.py).
+# Select groups on the command line, e.g.
+#   python -m clns.train benchmark=clear10 method=er model=resnet18 seed=1
+#   python -m clns.train experiment=smoke
+defaults:
+  - benchmark: imagenet100
+  - method: naive
+  - model: resnet18
+  - logger: wandb
+  - paths: default
+  - _self_
+  - experiment: null        # e.g. experiment=smoke; applied last, overrides everything above
+
+seed: 0
+# strict: cudnn.deterministic, no cudnn.benchmark, use_deterministic_algorithms(True, warn_only=False)
+#   -> an op without a deterministic CUDA kernel RAISES (RuntimeError naming the op). If that
+#   happens, rerun with deterministic=warn (non-deterministic ops only warn; note it in the
+#   results) or replace the op. warn: same but warn_only=True. off: cudnn.benchmark, no checks.
+#   true/false are accepted as strict/off.
+#   Volatile (not part of the run fingerprint): a strict run can be resumed with warn; the mode
+#   of every attempt is recorded (provenance.json deterministic_mode / resumes[*], and
+#   progress.json deterministic_modes).
+deterministic: strict        # strict | warn | off
+device: auto                 # auto | cuda | cpu
+
+train:
+  # TBD: shared fixed budget per benchmark (RESEARCH_LOG Q7); values below are placeholders.
+  epochs: 1
+  mb_size: 64
+  eval_mb_size: 256
+  lr: 0.01
+  optimizer: sgd             # sgd | adam (ignored by l2p, which uses method.lr with Adam)
+  momentum: 0.9
+  weight_decay: 0.0005
+  num_workers: 4
+  # 0 = Avalanche "eval at end of experience" mode; train.py passes eval_streams=[] so no extra
+  # evaluation runs, but Avalanche's forward-transfer metric requires eval_every > -1.
+  eval_every: 0
+  # int N: stop (without DONE) once N training experiences are complete; resume by re-running
+  # without it. Used to test checkpoint/resume.
+  stop_after_experiences: null
+  log_ram: false             # attach avalanche ram_usage_metrics (psutil thread)
+  # Class-IL: at evaluation, mask logits of classes not seen in training experiences 0..i
+  # (none masked for the random-init row). Ignored for domain-IL.
+  eval_mask_unseen: true
+  # true + benchmark.val_fraction>0: also evaluate the valid stream after every experience ->
+  # valid_matrix.json (for manual hyper-parameter selection; never used automatically).
+  eval_valid: false
+
+# Contract run directory; train.py reads this key, Hydra uses it as its run dir.
+run_dir: ${paths.output_dir}/runs/${benchmark.name}/${model.name}/${method.name}/seed${seed}
+
+hydra:
+  run:
+    dir: ${run_dir}
+  sweep:                     # --multirun keeps the same per-run layout
+    dir: ${paths.output_dir}/runs
+    subdir: ${benchmark.name}/${model.name}/${method.name}/seed${seed}
+  job:
+    chdir: false
+  # No .hydra/ dir: a refused attempt (exit 4/5) would overwrite it with the wrong config.
+  # config.yaml / config_resume_*.yaml / provenance.json written by train.py are authoritative.
+  output_subdir: null

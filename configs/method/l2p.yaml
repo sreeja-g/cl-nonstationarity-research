@@ -1,0 +1,13 @@
+name: l2p
+# TBD (tune on held-out experiences)
+# Requires model=vit_b16_l2p. L2P uses its own Adam: train.optimizer is ignored.
+# Every key below (except name) is forwarded to avalanche LearningToPrompt.
+pool_size: 20
+prompt_length: 5
+top_k: 5
+lr: 0.03
+sim_coefficient: 0.1
+drop_rate: 0.0
+drop_path_rate: 0.0
+use_cls_features: true
+use_mask: true        # TRAINING only: masks logits outside classes_in_this_experience; eval masking = train.eval_mask_unseen
