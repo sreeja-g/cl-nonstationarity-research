@@ -1,0 +1,9 @@
+name: wandb
+project: clns-nonstationarity
+entity: null
+group: ${benchmark.name}/${model.name}/${method.name}
+tags: []
+# auto: $WANDB_MODE if set; else online iff $WANDB_API_KEY is set; else offline (warning).
+# Explicit: online | offline | disabled. If wandb.init fails (network/auth/timeout,
+# WANDB_INIT_TIMEOUT default 120 s) the run retries once offline, then continues without W&B.
+mode: auto

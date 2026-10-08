@@ -1,0 +1,3 @@
+# @package paths
+data_dir: ${oc.env:CLNS_DATA_DIR,/workspace/data}
+output_dir: ${oc.env:CLNS_OUTPUT_DIR,/workspace/outputs}

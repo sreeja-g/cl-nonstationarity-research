@@ -1,0 +1,15 @@
+# @package benchmark
+name: synthetic
+scenario: class_il
+n_experiences: 5             # must divide 10
+max_experiences: null
+subsample_per_class: null
+val_fraction: 0.0
+image_size: 32
+train_transform: none
+eval_transform: none
+train_per_class: 20
+test_per_class: 10
+normalization: imagenet      # imagenet | vit (mean=std=0.5); train.py forces vit + image_size 224 for model=vit_b16_l2p
+subsample_seed: 0            # fixed seed of TEST subsampling (independent of the training seed)
+class_order_seed: 1993       # class order independent of the training seed (data uses the seed)

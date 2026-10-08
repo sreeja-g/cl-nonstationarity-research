@@ -1,0 +1,2 @@
+# No W&B: stdout + run_dir/log.txt + run_dir/metrics.jsonl only.
+name: none

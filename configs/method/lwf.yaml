@@ -1,0 +1,4 @@
+name: lwf
+# TBD (tune on held-out experiences)
+alpha: 1.0
+temperature: 2.0

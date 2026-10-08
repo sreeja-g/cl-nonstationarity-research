@@ -1,0 +1,17 @@
+# @package benchmark
+name: clear10
+scenario: domain_il
+n_experiences: 10
+max_experiences: null
+subsample_per_class: null
+val_fraction: 0.0
+image_size: 224
+train_transform: resize_train
+eval_transform: resize_eval
+protocol: iid                # ONLY iid: 'streaming' makes test == train (leakage) and raises
+split_seed: 0                # CLEAR train/test split seed, 0..4
+data_subdir: clear10
+allow_download: false
+normalization: imagenet      # imagenet | vit (mean=std=0.5); train.py forces vit + image_size 224 for model=vit_b16_l2p
+subsample_seed: 0            # fixed seed of TEST subsampling (independent of the training seed)
+require_done_marker: true    # need <data_dir>/<data_subdir>/.done from scripts/download_data.sh

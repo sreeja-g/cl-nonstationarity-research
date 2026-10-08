@@ -63,3 +63,20 @@ Thumbs.db
 # -----------------------------
 *.tmp
 *.swp
+
+# -----------------------------
+# clns framework
+# -----------------------------
+configs/paths/local.yaml
+wandb/
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+
+# secrets (never commit)
+.env
+.env.*
+kaggle.json
+.secrets/

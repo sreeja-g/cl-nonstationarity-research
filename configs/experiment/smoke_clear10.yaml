@@ -1,0 +1,26 @@
+# @package _global_
+# Small real-data run on CLEAR-10 (iid protocol); needs ${paths.data_dir}/clear10.
+#   python -m clns.train experiment=smoke_clear10
+defaults:
+  - override /benchmark: clear10
+  - override /method: naive
+  - override /model: resnet18
+  - override /logger: none
+
+device: auto
+
+# Smoke runs never share run directories with real runs (the run-dir path does not encode
+# protocol/hyper-parameters; the config fingerprint would refuse a mismatch with exit 4 anyway).
+paths:
+  output_dir: ${oc.env:CLNS_OUTPUT_DIR,/workspace/outputs}/smoke
+
+benchmark:
+  max_experiences: 2
+  subsample_per_class: 10
+  image_size: 64
+
+train:
+  epochs: 1
+  mb_size: 16
+  eval_mb_size: 32
+  num_workers: 2
