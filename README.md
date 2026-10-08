@@ -6,8 +6,8 @@ synthetic benchmark for tests). Methods: Naive, EWC, LwF, ER, L2P (more planned)
 Avalanche 0.6.0, Hydra and (optionally) Weights & Biases.
 
 This repository is code only. Research notes, the experiment matrix and the literature notes live
-outside it, in the sibling folder `../docs/` (`RESEARCH_LOG.md`, `EXPERIMENT_MATRIX.md`,
-`LITERATURE_NOTES.md`). The older top-level folders `benchmarks/`, `evaluation/`, `experiments/`,
+outside it, in the sibling folder `../research-hub/` (start at the dashboard `README.md`; then
+`02-study-design/`, `03-experiments/` and `01-literature/paper-notes.md`). The older top-level folders `benchmarks/`, `evaluation/`, `experiments/`,
 `models/`, `strategies/`, `tuning/`, `utils/` and `notebooks/` are legacy code kept for reference; the
 framework is the `src/clns` package.
 
