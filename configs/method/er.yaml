@@ -1,5 +1,6 @@
 name: er
-# TBD (tune on held-out experiences)
+# TBD (tune on held-out experiences: configs/experiment/tune.yaml)
+# Naive + avalanche ReplayPlugin. Same mem_size / batch_size_mem as method=derpp.
 mem_size: 2000
-storage: reservoir    # reservoir | class_balanced (class_balanced warns under domain_il)
-batch_size_mem: null  # null -> Avalanche default
+storage: class_balanced  # class_balanced | reservoir (class_balanced warns under domain_il)
+batch_size_mem: 64

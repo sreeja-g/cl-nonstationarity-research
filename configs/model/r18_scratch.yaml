@@ -1,0 +1,11 @@
+# Arm r18_scratch: ResNet-18 from scratch.
+# Allowed benchmarks: clns.models.ALLOWED.
+name: r18_scratch
+arch: resnet18            # resnet18 | resnet50 | mobilenetv2
+init: scratch       # scratch | places365 | imagenet
+trainable: all      # all | last_block
+weights_file: null
+weights_sha256: null
+image_size: null    # null -> keep benchmark.image_size
+normalization: null # null -> keep benchmark.normalization
+cifar_stem: false   # true: 3x3/stride-1 stem + no max-pool (small inputs, e.g. smoke runs)

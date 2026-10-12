@@ -24,10 +24,12 @@ METHODS = {
     "ewc": {"name": "ewc", "ewc_lambda": 10, "mode": "separate", "decay_factor": None},
     "lwf": {"name": "lwf", "alpha": 1.0, "temperature": 2.0},
     "er": {"name": "er", "mem_size": 20, "storage": "reservoir", "batch_size_mem": None},
+    "derpp": {"name": "derpp", "mem_size": 20, "batch_size_mem": 4, "alpha": 0.1, "beta": 0.5},
 }
-RESNET = OmegaConf.create({"name": "resnet18", "cifar_stem": False})
-VIT = OmegaConf.create({"name": "vit_b16_l2p", "timm_name": "vit_base_patch16_224", "pretrained": False})
-L2P = OmegaConf.create({"name": "l2p", "pool_size": 4, "prompt_length": 2, "top_k": 2, "lr": 0.03})
+RESNET = OmegaConf.create(
+    {"name": "r18_scratch", "arch": "resnet18", "init": "scratch", "trainable": "all",
+     "cifar_stem": False}
+)
 
 
 def _evaluator():
@@ -38,39 +40,34 @@ def _evaluator():
 
 def _build(method_cfg, model_cfg=RESNET, model=None, num_classes=10, **kw):
     if model is None:
-        model = build_model(model_cfg, num_classes)
+        model = build_model(model_cfg, num_classes, "synthetic")
     return build_strategy(
-        OmegaConf.create(method_cfg), model_cfg, TRAIN, model, num_classes, _evaluator(), [], "cpu", **kw
+        OmegaConf.create(method_cfg), model_cfg, TRAIN, model, num_classes, _evaluator(), [], "cpu",
+        **kw,
     )
 
 
 @pytest.mark.parametrize("name", list(METHODS))
-def test_build_non_l2p(name):
+def test_build_methods(name):
     assert _build(METHODS[name]) is not None
 
 
 def test_resnet18_shapes():
-    m = build_model(RESNET, 7)
+    m = build_model(RESNET, 7, "synthetic")
     assert m(torch.zeros(2, 3, 64, 64)).shape == (2, 7)
-    m2 = build_model(OmegaConf.create({"name": "resnet18", "cifar_stem": True}), 5)
+    m2 = build_model(OmegaConf.merge(RESNET, {"cifar_stem": True}), 5, "synthetic")
     assert isinstance(m2.maxpool, torch.nn.Identity)
     assert m2(torch.zeros(2, 3, 32, 32)).shape == (2, 5)
 
 
-def test_vit_model_is_none():
-    assert build_model(VIT, 10) is None
-
-
 def test_unknown_model():
-    with pytest.raises(ValueError, match="resnet18"):
-        build_model(OmegaConf.create({"name": "foo"}), 10)
+    with pytest.raises(ValueError, match="r18_scratch"):
+        build_model(OmegaConf.create({"name": "foo", "arch": "resnet18"}), 10, "synthetic")
 
 
 def test_invalid_combos():
-    with pytest.raises(ValueError, match="l2p requires model.name=vit_b16_l2p"):
-        _build(OmegaConf.to_container(L2P), RESNET)
-    with pytest.raises(NotImplementedError):
-        _build(METHODS["naive"], VIT, model=None)
+    with pytest.raises(ValueError, match="Unknown method"):
+        _build({"name": "packnet"})
     with pytest.raises(ValueError, match="Unknown method"):
         _build({"name": "bogus"})
     with pytest.raises(ValueError, match="decay_factor"):
@@ -80,14 +77,10 @@ def test_invalid_combos():
 def test_unknown_optimizer():
     bad = TRAIN.copy()
     bad.optimizer = "rmsprop"
-    model = build_model(RESNET, 10)
+    model = build_model(RESNET, 10, "synthetic")
     with pytest.raises(ValueError, match="optimizer"):
-        build_strategy(OmegaConf.create(METHODS["naive"]), RESNET, bad, model, 10, _evaluator(), [], "cpu")
-
-
-@pytest.mark.slow
-def test_build_l2p():
-    assert _build(OmegaConf.to_container(L2P), VIT, model=None) is not None
+        build_strategy(OmegaConf.create(METHODS["naive"]), RESNET, bad, model, 10, _evaluator(), [],
+                       "cpu")
 
 
 def test_er_buffer_bounded():
@@ -123,7 +116,7 @@ def test_er_buffer_bounded():
 def test_resnet18_deterministic_pooling():
     from clns.models import GlobalMeanPool2d
 
-    m = build_model(RESNET, 3)
+    m = build_model(RESNET, 3, "synthetic")
     assert isinstance(m.avgpool, GlobalMeanPool2d)
     x = torch.randn(2, 512, 4, 4)
     ref = torch.nn.AdaptiveAvgPool2d((1, 1))(x)
@@ -145,6 +138,8 @@ def test_ewc_config_has_no_keep_importance_data(repo_root):
     cfg = OmegaConf.load(repo_root / "configs" / "method" / "ewc.yaml")
     assert "keep_importance_data" not in cfg
     assert cfg.max_separate_experiences == 20
+    # spec: EWC online + decay_factor on every benchmark (default config)
+    assert cfg.mode == "online" and cfg.decay_factor is not None
 
 
 def test_deterministic_modes():

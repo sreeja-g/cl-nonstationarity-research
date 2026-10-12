@@ -12,13 +12,13 @@ from clns.analysis.correlation_study import (  # noqa: E402
     check_shift_matches_run,
     forgetting,
     load_accuracy_matrices,
-    main as correlation_main,
     one_step_forgetting,
     partial_spearman,
     run_transition_table,
     shift_transitions,
     spearman_study,
 )
+from clns.analysis.correlation_study import main as correlation_main  # noqa: E402
 from clns.analysis.rank_inversion import (  # noqa: E402
     bootstrap_flip_stability,
     compute_rankings,
@@ -406,10 +406,31 @@ def test_correlation_guards(tmp_path):
             check_shift_matches_run(bad, rec)
 
     _write_shift(shifts, "bm", 0, np.zeros((5, 5)), [0, 1, 2, 3])  # T mismatch
+    args = ["--runs-dir", str(runs), "--shift-dir", str(shifts), "--out", str(tmp_path / "o.csv")]
     with pytest.raises(ValueError, match="T_train"):
-        correlation_main([
-            "--runs-dir", str(runs), "--shift-dir", str(shifts), "--out", str(tmp_path / "o.csv"),
-        ])
+        correlation_main([*args, "--strict"])
+    # default: the mismatched run is skipped and counted; nothing left -> clean error
+    with pytest.warns(UserWarning, match="shift mismatch"):
+        assert correlation_main(args) == 1
+
+
+def test_correlation_skips_and_counts_shift_mismatch(tmp_path):
+    runs, shifts = tmp_path / "runs", tmp_path / "shift"
+    order = [0, 1, 2, 3, 4, 5, 6, 7]
+    m = np.zeros((4, 4))
+    m[0, 1], m[1, 2], m[2, 3] = 0.1, 0.3, 0.2
+    _write_shift(shifts, "bm", 0, m + m.T, order)
+    for seed in range(2):
+        _write_run(runs, "bm", "resnet18", "ewc", seed, _acc(seed, 0.0), order)
+    _write_run(runs, "bm", "resnet18", "ewc", 2, _acc(2, 0.0), order[::-1])  # other order
+    out = tmp_path / "corr.csv"
+    with pytest.warns(UserWarning, match="shift mismatch"):
+        assert correlation_main([
+            "--runs-dir", str(runs), "--shift-dir", str(shifts), "--out", str(out),
+            "--n-boot", "10", "--n-perm", "10",
+        ]) == 0
+    res = pd.read_csv(out)
+    assert (res["n_runs"] == 2).all() and (res["n_runs_shift_mismatch"] == 1).all()
 
 
 def test_shift_matched_by_class_order_not_seed(tmp_path):
@@ -445,8 +466,11 @@ def test_select_shift_preference_and_conflicts(tmp_path):
     cands = load_shift_candidates(shifts, "bm")
     assert [c["seed"] for c in cands] == [0, 1, 2]
     assert select_shift(cands, recs[1])["seed"] == 1  # own seed preferred among matches
+    # seeds 0 and 1 both match, neither is seed 7: identical matrices -> accepted (lowest seed)
+    assert select_shift(cands, recs[7])["seed"] == 0
+    differ = [cands[0], {**cands[1], "matrix": np.ones((4, 4))}, cands[2]]
     with pytest.raises(ValueError, match="conflicting"):
-        select_shift(cands, recs[7])  # seeds 0 and 1 both match, neither is seed 7
+        select_shift(differ, recs[7])  # ... but differing matches conflict
     assert select_shift(cands[:1] + cands[2:], recs[7])["seed"] == 0  # single match, any seed
     with pytest.raises(ValueError, match="no shift result matches"):
         select_shift(cands[2:], recs[7])
@@ -462,3 +486,36 @@ def test_domain_il_shift_without_class_order(tmp_path):
     check_shift_matches_run(sh, rec)  # absent on both sides -> match (seed irrelevant)
     with pytest.raises(ValueError, match="class_order"):
         check_shift_matches_run({**sh, "meta": {**sh["meta"], "class_order": [0, 1]}}, rec)
+
+
+def test_correlation_units_follow_actual_task_pairs(tmp_path):
+    """DomainNet-like: seeds with different domain orders must NOT share transition units
+    (v1 mapped transition k of every seed to ``fixed|k``); equal orders share them."""
+    runs, shifts = tmp_path / "runs", tmp_path / "shift"
+    doms = ["clipart", "real", "sketch", "painting"]
+    orders = {0: doms, 1: doms[::-1], 2: doms}  # seeds 0 and 2 share an order
+    m = np.zeros((4, 4))
+    m[0, 1], m[1, 2], m[2, 3] = 0.1, 0.3, 0.2
+    for seed, order in orders.items():
+        sha = ",".join(order)
+        d = shifts / "dn" / f"seed{seed}"
+        d.mkdir(parents=True)
+        np.savez(d / "shift_matrix.npz", matrix=m + m.T)
+        (d / "shift_meta.json").write_text(json.dumps({
+            "T": 4, "class_order": None, "task_order_sha256": sha,
+            "split_hashes": {"task_order_sha256": sha}}))
+        _write_run(runs, "dn", "resnet18", "ewc", seed, _acc(seed, 0.0), None)
+        prov = runs / "dn" / "resnet18" / "ewc" / f"seed{seed}" / "provenance.json"
+        prov.write_text(json.dumps({"benchmark_meta": {
+            "class_order": None, "task_order": order, "task_order_sha256": sha}}))
+        acc = prov.parent / "accuracy_matrix.json"
+        acc.write_text(json.dumps({**json.loads(acc.read_text()), "scenario": "domain_il"}))
+    out = tmp_path / "corr.csv"
+    assert correlation_main([
+        "--runs-dir", str(runs), "--shift-dir", str(shifts), "--out", str(out),
+        "--n-boot", "10", "--n-perm", "10",
+    ]) == 0
+    res = pd.read_csv(out)
+    # 3 transitions of order A (seeds 0, 2) + 3 transitions of the reversed order B (seed 1)
+    # = 6 units, not the 3 that "fixed|k" would give.
+    assert (res["n_transitions"] == 6).all()

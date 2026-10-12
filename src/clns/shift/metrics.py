@@ -327,7 +327,7 @@ def mmd_permutation_test(
     return obs, p
 
 
-def _unbiased_hsic(k: torch.Tensor, l: torch.Tensor) -> torch.Tensor:
+def _unbiased_hsic(k: torch.Tensor, gl: torch.Tensor) -> torch.Tensor:
     """Unbiased HSIC estimator of Song et al. (2007) from two n x n Gram matrices.
 
     HSIC_u = [tr(K~ L~) + (1'K~1)(1'L~1)/((n-1)(n-2)) - 2/(n-2) 1'K~L~1] / (n(n-3)),
@@ -335,13 +335,13 @@ def _unbiased_hsic(k: torch.Tensor, l: torch.Tensor) -> torch.Tensor:
     """
     n = k.shape[0]
     k = k.clone()
-    l = l.clone()
+    gl = gl.clone()
     k.fill_diagonal_(0.0)
-    l.fill_diagonal_(0.0)
+    gl.fill_diagonal_(0.0)
     ones = torch.ones(n, 1, dtype=k.dtype, device=k.device)
-    tr = (k * l).sum()  # tr(K L) for symmetric L
-    term2 = (ones.T @ k @ ones) * (ones.T @ l @ ones) / ((n - 1) * (n - 2))
-    term3 = 2.0 / (n - 2) * (ones.T @ k @ l @ ones)
+    tr = (k * gl).sum()  # tr(K L) for symmetric L
+    term2 = (ones.T @ k @ ones) * (ones.T @ gl @ ones) / ((n - 1) * (n - 2))
+    term3 = 2.0 / (n - 2) * (ones.T @ k @ gl @ ones)
     return (tr + term2.squeeze() - term3.squeeze()) / (n * (n - 3))
 
 
@@ -383,18 +383,18 @@ def linear_cka(
         if n < 4:
             raise ValueError(f"debiased CKA needs n >= 4, got n={n}")
         k = x @ x.T
-        l = y @ y.T
-        hxy = _unbiased_hsic(k, l)
+        gl = y @ y.T
+        hxy = _unbiased_hsic(k, gl)
         hxx = _unbiased_hsic(k, k)
-        hyy = _unbiased_hsic(l, l)
+        hyy = _unbiased_hsic(gl, gl)
         if float(hxx) <= 0.0 or float(hyy) <= 0.0:
             return float("nan")
         return float(hxy / torch.sqrt(hxx * hyy).clamp_min(eps))
     if max(x.shape[1], y.shape[1]) > n:
         k = x @ x.T
-        l = y @ y.T
-        num = (k * l).sum()
-        den = torch.linalg.matrix_norm(k, ord="fro") * torch.linalg.matrix_norm(l, ord="fro")
+        gl = y @ y.T
+        num = (k * gl).sum()
+        den = torch.linalg.matrix_norm(k, ord="fro") * torch.linalg.matrix_norm(gl, ord="fro")
         return float(num / den.clamp_min(eps))
     hsic = torch.linalg.matrix_norm(y.T @ x, ord="fro") ** 2
     nx = torch.linalg.matrix_norm(x.T @ x, ord="fro")

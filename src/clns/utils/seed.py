@@ -87,8 +87,8 @@ def seed_everything(seed: int, deterministic="strict") -> str:
     ``deterministic`` (see :func:`resolve_deterministic`):
       * "strict": cudnn.deterministic, no cudnn.benchmark,
         ``torch.use_deterministic_algorithms(True, warn_only=False)`` -> any op WITHOUT a
-        deterministic implementation RAISES a RuntimeError naming the op. The ResNet-18 global
-        pooling is already replaced by a deterministic mean (models/resnet18.py). If a run
+        deterministic implementation RAISES a RuntimeError naming the op. The backbones' global
+        pooling is already replaced by a deterministic mean (models/backbones.py). If a run
         stops with such an error, rerun with ``deterministic=warn`` (and note it) or replace the
         op.
       * "warn": same, but ``warn_only=True`` (non-deterministic ops only warn).

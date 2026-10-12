@@ -1,0 +1,21 @@
+# Arm mbv2_imagenet: MobileNetV2, MobileNet_V2_Weights.IMAGENET1K_V1,
+# last block trainable (core50_nic only).
+# Allowed benchmarks: clns.models.ALLOWED.
+name: mbv2_imagenet
+arch: mobilenetv2
+init: imagenet
+# last_block: ResNet layer4 + fc; MobileNetV2 features.17 + features.18 + classifier
+# (clns.models.freezing.LAST_BLOCK). Frozen part: requires_grad=False + FrozenBatchNorm2d.
+trainable: last_block
+# weights_file: in ${paths.weights_dir};
+# torchvision cache file name (informational; torchvision downloads it on first use)
+weights_file: mobilenet_v2-b0353104.pth
+# Pin after the first download (sha256sum <weights_dir>/<weights_file>) and BEFORE the first GPU
+# run of this arm: it is part of the run fingerprint, so changing it later makes existing run
+# dirs of this arm refuse to resume/skip (exit 4). null only warns; the actual hash is always
+# recorded in provenance.json (weights.sha256).
+weights_sha256: null
+image_size: null         # null -> benchmark.image_size (every arm runs at the benchmark's
+                         # resolution: CORe50 128 px, the others 224 px)
+normalization: imagenet  # copied into benchmark.normalization by train.py
+cifar_stem: false        # pretrained stem; train.py resets true (experiment=smoke) to false

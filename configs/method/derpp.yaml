@@ -1,0 +1,9 @@
+name: derpp
+# TBD (tune on held-out experiences: configs/experiment/tune.yaml)
+# DER++ = avalanche DER with alpha > 0 (logit MSE on replayed samples) and beta > 0 (CE on
+# replayed samples). DER keeps its own class-balanced buffer with logits. Same mem_size /
+# batch_size_mem as method=er.
+mem_size: 2000
+batch_size_mem: 64
+alpha: 0.1
+beta: 0.5

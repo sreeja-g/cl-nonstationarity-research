@@ -1,11 +1,11 @@
 # Root config for `python -m clns.train` (src/clns/train.py).
 # Select groups on the command line, e.g.
-#   python -m clns.train benchmark=clear10 method=er model=resnet18 seed=1
+#   python -m clns.train benchmark=clear10 method=er model=r18_scratch seed=1
 #   python -m clns.train experiment=smoke
 defaults:
   - benchmark: imagenet100
   - method: naive
-  - model: resnet18
+  - model: r18_scratch
   - logger: wandb
   - paths: default
   - _self_
@@ -29,7 +29,7 @@ train:
   mb_size: 64
   eval_mb_size: 256
   lr: 0.01
-  optimizer: sgd             # sgd | adam (ignored by l2p, which uses method.lr with Adam)
+  optimizer: sgd             # sgd | adam
   momentum: 0.9
   weight_decay: 0.0005
   num_workers: 4
@@ -46,6 +46,14 @@ train:
   # true + benchmark.val_fraction>0: also evaluate the valid stream after every experience ->
   # valid_matrix.json (for manual hyper-parameter selection; never used automatically).
   eval_valid: false
+  # Penultimate features of a fixed probe set (max_images test images, an equal quota per class
+  # over the whole test set; drawn with probe_seed, identical for every training seed / task
+  # order), extracted after every experience -> run_dir/probe/row_XXXX.npz (float16) + meta.npz
+  # for offline CKA (clns.evaluation.probe).
+  probe:
+    enabled: true
+    max_images: 500
+    probe_seed: 12345
 
 # Contract run directory; train.py reads this key, Hydra uses it as its run dir.
 run_dir: ${paths.output_dir}/runs/${benchmark.name}/${model.name}/${method.name}/seed${seed}

@@ -77,7 +77,7 @@ def env_info() -> dict[str, Any]:
             info["gpus"] = []
     except Exception:  # noqa: BLE001
         info.setdefault("torch", None)
-    for mod in ("avalanche", "torchvision", "timm", "hydra", "omegaconf", "numpy"):
+    for mod in ("avalanche", "torchvision", "hydra", "omegaconf", "numpy"):
         try:
             info[mod] = __import__(mod).__version__
         except Exception:  # noqa: BLE001

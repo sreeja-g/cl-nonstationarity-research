@@ -1,12 +1,12 @@
 """End-to-end smoke tests of clns.train on the synthetic benchmark (CPU, logger=none).
 
-Per method (naive, ewc, lwf, er):
+Per method (naive, ewc, lwf, er, derpp):
   run 1: stop_after_experiences=1 -> no DONE, checkpoint with exp_counter 1
   run 2: resume -> DONE, 2x2 accuracy matrix, summary.json, no re-training of exp 0
-  run 3: DONE present -> returns 0 without building anything
+  run 3: DONE present -> returns 0 without building anything (checkpoint.pt deleted after DONE)
 plus: an uninterrupted run with the same seed gives the same matrix (resume == no resume);
 config-fingerprint mismatch -> exit 4; crash during experience 0 -> metrics.jsonl truncated;
-L2P (pretrained=false, slow) trains one iteration and evaluates.
+invalid model config -> exit 2 without a run dir; a Places365 arm (fake checkpoint) stop/resume.
 """
 
 import json
@@ -40,7 +40,8 @@ METHOD_OVERRIDES = {
     "naive": [],
     "ewc": ["method.ewc_lambda=10"],
     "lwf": [],
-    "er": ["method.mem_size=20"],
+    "er": ["method.mem_size=20", "method.batch_size_mem=4"],
+    "derpp": ["method.mem_size=20", "method.batch_size_mem=4"],
 }
 
 
@@ -60,7 +61,7 @@ def _cfg(out_dir: Path, *extra: str):
         )
 
 
-def _run_dir(out_dir: Path, method: str = "naive", model: str = "resnet18") -> Path:
+def _run_dir(out_dir: Path, method: str = "naive", model: str = "r18_scratch") -> Path:
     return out_dir / "runs" / "synthetic" / model / method / "seed0"
 
 
@@ -89,15 +90,25 @@ def test_run_resume_done(tmp_path, method):
     assert len(m1["rows"]) == 1 and m1["random_init"] is not None
     prog1 = json.loads((rd / "progress.json").read_text())
     assert prog1["n_done"] == 1 and len(prog1["train_time_s_per_exp"]) == 1
+    import numpy as np
+
+    from clns.evaluation.probe import load_probe
+
+    z = load_probe(rd / "probe")
+    assert z["features"].shape == (1, 16, 512)  # 2 test exps x 8 images, r18 penultimate
+    assert z["features"].dtype == np.float16 and z["exp_index"].tolist() == [0]
 
     # --- run 2: resume and finish ---
     assert train_mod.run(_cfg(out, *extra)) == 0
     assert (rd / "DONE").exists() and not (rd / "failure.json").exists()
+    assert not (rd / "checkpoint.pt").exists()  # deleted once DONE is written
     matrix = json.loads((rd / "accuracy_matrix.json").read_text())
     assert len(matrix["rows"]) == 2 and all(len(r) == 2 for r in matrix["rows"])
     assert matrix["test_exp_to_train_exp"] == [0, 1]
     assert matrix["scenario"] == "class_il"
     assert matrix["rows"][0] == m1["rows"][0]  # row 0 preserved across the resume
+    z = load_probe(rd / "probe")
+    assert z["exp_index"].tolist() == [0, 1]  # one row per completed experience
     # eval-time class mask: after exp 0, the unseen test experience 1 scores exactly 0
     assert matrix["rows"][0][1] == 0.0
 
@@ -123,6 +134,8 @@ def test_run_resume_done(tmp_path, method):
     assert any(r["name"].startswith("Top1_ClassAcc_Stream/") for r in recs)
     prov = json.loads((rd / "provenance.json").read_text())
     assert len(prov["resumes"]) == 1
+    assert prov["params"]["trainable"] == prov["params"]["total"] > 0  # r18_scratch: all
+    assert prov["weights"] is None  # scratch arm
 
     # --- run 3: DONE -> immediate return, nothing is built ---
     def _boom(*a, **k):
@@ -184,6 +197,11 @@ def test_exp0_crash_truncates_metrics(tmp_path, monkeypatch):
                    and r["n_trained"] == 0]
     assert len(init_stream) == 1  # random-init eval logged once
 
+    from clns.evaluation.probe import load_probe
+
+    # the stale row of the crashed attempt was dropped
+    assert load_probe(rd / "probe")["exp_index"].tolist() == [0, 1]
+
 
 def test_eval_valid_writes_valid_matrix(tmp_path):
     out = tmp_path / "valid"
@@ -195,29 +213,59 @@ def test_eval_valid_writes_valid_matrix(tmp_path):
     assert test["stream"] == "test" and len(test["rows"]) == 2
 
 
-@pytest.mark.slow
-def test_l2p_smoke(tmp_path):
-    """L2P (ViT-B/16, random init, CPU): random-init eval, 1 training iteration, eval."""
-    pytest.importorskip("timm")
-    out = tmp_path / "l2p"
-    cfg = _cfg(
-        out,
-        "method=l2p",
-        "model=vit_b16_l2p",
-        "model.pretrained=false",
-        "method.pool_size=4",
-        "method.prompt_length=2",
-        "method.top_k=2",
-        "benchmark.train_per_class=4",  # 2 classes x 4 = 8 = one minibatch
-        "benchmark.test_per_class=2",
-        "train.stop_after_experiences=1",
-    )
-    assert train_mod.run(cfg) == 0
-    rd = _run_dir(out, "l2p", "vit_b16_l2p")
-    m = json.loads((rd / "accuracy_matrix.json").read_text())
-    assert len(m["rows"]) == 1 and m["random_init"] is not None
-    resolved = (rd / "config.yaml").read_text()
-    assert "image_size: 224" in resolved and "normalization: vit" in resolved
-    recs = _jsonl(rd / "metrics.jsonl")
-    losses = [r["value"] for r in recs if r["name"].startswith("Loss_Epoch/")]
-    assert losses and all(v == v and abs(v) < 1e6 for v in losses)  # finite (mask not all -inf)
+@pytest.mark.parametrize(
+    "extra",
+    [
+        ["model=r18_scratch", "model.init=imagenet"],  # not the canonical arm spec
+        ["benchmark=clear10", "model=r18_imagenet"],  # arm x benchmark not allowed
+        ["model=r18_places"],  # Places365 weights file missing
+    ],
+)
+def test_invalid_model_config_exit_2_no_run_dir(tmp_path, extra):
+    out = tmp_path / "bad"
+    weights = tmp_path / "no_weights"
+    cfg = _cfg(out, *extra, f"paths.weights_dir={weights.as_posix()}")
+    assert train_mod.run(cfg) == train_mod.EXIT_INVALID_CONFIG == 2
+    assert not out.exists() and not weights.exists()  # no run dir, provenance, lock
+
+
+def test_pretrained_arm_smoke_resume(tmp_path, fake_places):
+    """experiment=smoke with a Places365 arm: cifar_stem reset, weights hash pinned and recorded,
+    FrozenBatchNorm2d survives stop/resume."""
+    out = tmp_path / "places"
+    wdir = tmp_path / "weights"
+    wdir.mkdir()
+    sha = fake_places(wdir / "resnet18_places365.pth.tar")
+    extra = ["model=r18_places", f"paths.weights_dir={wdir.as_posix()}",
+             f"model.weights_sha256={sha}"]
+    rd = _run_dir(out, model="r18_places")
+    assert train_mod.run(_cfg(out, *extra, "train.stop_after_experiences=1")) == 0
+    assert (rd / "checkpoint.pt").exists() and not (rd / "DONE").exists()
+    assert train_mod.run(_cfg(out, *extra)) == 0
+    assert (rd / "DONE").exists() and not (rd / "failure.json").exists()
+    matrix = json.loads((rd / "accuracy_matrix.json").read_text())
+    assert len(matrix["rows"]) == 2
+    prov = json.loads((rd / "provenance.json").read_text())
+    assert 0 < prov["params"]["trainable"] < prov["params"]["total"]
+    assert prov["weights"]["sha256"] == sha
+    assert prov["weights"]["file"].endswith("resnet18_places365.pth.tar")
+    assert len(prov["resumes"]) == 1
+    from omegaconf import OmegaConf
+
+    saved = OmegaConf.load(rd / "config.yaml")
+    assert saved["model"]["cifar_stem"] is False  # smoke's cifar_stem=true ignored
+    assert saved["benchmark"]["image_size"] == 32  # benchmark resolution kept
+
+
+def test_seed_follows_task_order(tmp_path):
+    """seed=1 trains on its own synthetic class order (recorded in provenance benchmark_meta)."""
+    from clns.data.synthetic import synthetic_class_order
+
+    out = tmp_path / "o"
+    assert train_mod.run(_cfg(out, "seed=1", "train.stop_after_experiences=1")) == 0
+    rd = out / "runs" / "synthetic" / "r18_scratch" / "naive" / "seed1"
+    meta = json.loads((rd / "provenance.json").read_text(encoding="utf-8"))["benchmark_meta"]
+    order1 = synthetic_class_order(1993, 1)
+    assert order1 != synthetic_class_order(1993, 0)
+    assert meta["task_order"] == order1 and meta["seed"] == 1
+    assert meta["train_classes"] == [sorted(order1[:2]), sorted(order1[2:4])]

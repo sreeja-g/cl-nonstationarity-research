@@ -13,10 +13,6 @@ dependencies = [
     "torch==2.3.1",
     "torchvision==0.18.1",
     "avalanche-lib==0.6.0",
-    # avalanche 0.6.0 models/timm_vit.py (L2P) does resolve_pretrained_cfg(...)["url"] and
-    # build_model_with_cfg(..., pretrained_custom_load=...): dict cfg + that kwarg exist only in
-    # timm 0.6.x (0.9 returns a PretrainedCfg dataclass and dropped the kwarg). (verify)
-    "timm==0.6.12",
     "hydra-core==1.3.2",
     "omegaconf==2.3.0",
     # avalanche 0.6.0 WandBLogger calls wandb.run._label(repo=...) (private API) -> pin a
@@ -30,6 +26,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest", "ruff"]
+plots = ["matplotlib"]
 
 [project.scripts]
 clns-train = "clns.train:main"

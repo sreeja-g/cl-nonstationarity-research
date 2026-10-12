@@ -1,6 +1,0 @@
-name: vit_b16_l2p
-timm_name: vit_base_patch16_224
-# Q1 (open): these timm weights are IN-21k pretrained + IN-1k fine-tuned -> overlap with ImageNet-100.
-pretrained: true      # set false for offline smoke tests (random init, no download)
-# Input: train.py forces benchmark.image_size=224 and benchmark.normalization=vit (mean=std=0.5,
-# timm pretrained cfg of vit_base_patch16_224) for this model (logged). Needs timm 0.6.x.

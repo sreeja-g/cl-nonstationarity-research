@@ -1,0 +1,81 @@
+# @package _global_
+# Hyper-parameter tuning on the PILOT benchmark (CLEAR-10), first transitions only, scored on a
+# held-out validation stream carved from TRAIN (never on test). One small grid per method via
+# Hydra multirun, e.g.
+#   python -m clns.train experiment=tune method=ewc method.ewc_lambda=100,1000,10000 seed=0,1,2 --multirun
+#   python -m clns.train experiment=tune method=lwf method.alpha=0.5,1,2 --multirun
+#   python -m clns.train experiment=tune method=er method.mem_size=500,2000 --multirun
+#   python -m clns.train experiment=tune method=derpp method.alpha=0.1,0.3 method.beta=0.5,1.0 --multirun
+# Order: tune -> write the chosen values into configs/method/*.yaml -> pilot -> grid. They are reused on
+# EVERY benchmark and arm; changing configs/method/*.yaml after pilot/grid runs exist makes those runs exit 4
+# (config fingerprint mismatch).
+# Pass the transitions used here to the analysis (the tuned transitions are flagged):
+#   python -m clns.analysis.hypotheses ... --tuned-transitions clear10:0,clear10:1
+# Needs ${paths.data_dir}/clear10 (scripts/download_data.sh clear10).
+defaults:
+  - override /benchmark: clear10
+  - override /method: naive
+  - override /model: r18_scratch
+  - override /logger: none
+
+device: auto
+
+# Tuning runs never share run directories with real runs (output root .../tune).
+paths:
+  output_dir: ${oc.env:CLNS_OUTPUT_DIR,/workspace/outputs}/tune
+
+# TUNING ONLY (the production run_dir contract in train.yaml is unchanged): the run directory
+# encodes the overridden hyper-parameters (Hydra's job.override_dirname, e.g.
+#   .../tune/runs/clear10/r18_scratch/ewc/hp_method.ewc_lambda=100/seed0
+# ) so every swept value gets its own run dir. Without it all values of a sweep map to one dir and
+# every job after the first is refused with exit 4 (config fingerprint mismatch). Keys that
+# already form the path (experiment/benchmark/model/method/seed) and volatile keys (not part of
+# the fingerprint: paths.* = configs/paths/*.yaml keys, logger.* = configs/logger/*.yaml keys,
+# device, deterministic, num_workers, eval_mb_size, stop_after_experiences) are excluded, so a
+# resume with e.g. deterministic=warn or logger.tags=[x] finds its dir. Hydra matches exclude_keys
+# EXACTLY (a leading +/++/~ is ignored), so every concrete key is listed; a new key added to
+# configs/logger or configs/paths must be added here too.
+# Override VALUES become a path segment: use only letters, digits and . _ - = , (no / \ : * ? " < > |
+# and no spaces). Keep the hp_ segment short: a path component may be at most 255 bytes (Linux);
+# Windows paths are limited to 260 characters unless long paths are enabled. Sweep few keys per
+# job, with short values (e.g. method.ewc_lambda=1e3, not long lists); no hashing is applied.
+run_dir: ${paths.output_dir}/runs/${benchmark.name}/${model.name}/${method.name}/hp_${hydra:job.override_dirname}/seed${seed}
+
+hydra:
+  sweep:
+    subdir: ${benchmark.name}/${model.name}/${method.name}/hp_${hydra:job.override_dirname}/seed${seed}
+  job:
+    config:
+      override_dirname:
+        exclude_keys:
+          - experiment
+          - benchmark
+          - model
+          - method
+          - seed
+          - paths
+          - paths.output_dir
+          - paths.data_dir
+          - paths.weights_dir
+          - logger
+          - logger.name
+          - logger.project
+          - logger.entity
+          - logger.group
+          - logger.tags
+          - logger.mode
+          - device
+          - deterministic
+          - train.num_workers
+          - train.eval_mb_size
+          - train.stop_after_experiences
+
+benchmark:
+  max_experiences: 3          # transitions 0 and 1 (indices into the stream, flagged in the analysis)
+  val_fraction: 0.2           # class-balanced validation carved from TRAIN only
+
+train:
+  eval_valid: true            # valid_matrix.json = the tuning score
+  epochs: 1
+  probe:
+    enabled: false
