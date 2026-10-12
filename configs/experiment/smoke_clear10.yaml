@@ -4,7 +4,7 @@
 defaults:
   - override /benchmark: clear10
   - override /method: naive
-  - override /model: resnet18
+  - override /model: r18_scratch
   - override /logger: none
 
 device: auto

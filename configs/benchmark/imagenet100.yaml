@@ -1,7 +1,7 @@
 # @package benchmark
 name: imagenet100
 scenario: class_il
-n_experiences: 10            # 10 x 10 classes; must divide 100 (use 5/20 for the other splits)
+n_experiences: 20            # 20 x 5 classes; must divide 100
 max_experiences: null        # int -> truncate stream (smoke tests)
 subsample_per_class: null    # int -> cap samples per class (smoke tests)
 val_fraction: 0.0            # >0 -> class-balanced validation carved from TRAIN only
@@ -10,8 +10,8 @@ train_transform: imagenet_train
 eval_transform: imagenet_eval
 data_subdir: ILSVRC2012      # <data_dir>/ILSVRC2012/{train,val}/<wnid>/
 classes_sha256: 43144af8bbd16373ee0ce824c090b4cd2f2668fc79f884a7c57bf3d056a441d4
-normalization: imagenet      # imagenet | vit (mean=std=0.5); train.py forces vit + image_size 224 for model=vit_b16_l2p
+normalization: imagenet      # pretrained model arms copy model.normalization here (train.py)
 subsample_seed: 0            # fixed seed of TEST subsampling (independent of the training seed)
 require_done_marker: true    # need <data_dir>/<data_subdir>/.done from scripts/download_data.sh
-class_order_seed: 1993       # UCIR/PODNet seed; RandomState(seed).permutation(100), same for all training seeds
+class_order_seed: 1993       # seed 0: UCIR/PODNet RandomState(1993).permutation(100); seed k>0: default_rng([1993, k])
 val_images_per_class: 50     # completeness check of ILSVRC2012 val (50 x 100 = 5000 images)

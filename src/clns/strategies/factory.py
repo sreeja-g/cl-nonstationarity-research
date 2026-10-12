@@ -1,27 +1,33 @@
-"""Strategy factory: naive, ewc, lwf, er, l2p.
+"""Strategy factory: naive, ewc, lwf, er, derpp (Avalanche 0.6.0 built-in strategies only).
 
-L2P (avalanche LearningToPrompt, v0.6.0) masks logits of classes outside
-``experience.classes_in_this_experience`` only while TRAINING (``use_mask and is_training``); at
-evaluation it uses the full head. Class-IL eval-time masking of not-yet-seen classes is done
-uniformly for every method by ``clns.evaluation.plugins.EvalClassMaskPlugin``.
+  * naive -> ``Naive``; ewc -> ``EWC``; lwf -> ``LwF`` + :class:`LwFTeacherEvalPlugin`
+    (teacher in eval mode, see ``clns.strategies.plugins``);
+  * er    -> ``Naive`` + ``ReplayPlugin`` (``method.storage``: class_balanced | reservoir);
+  * derpp -> ``DER`` with alpha > 0 and beta > 0 (DER++; Avalanche's DER keeps its own
+    class-balanced buffer with logits). er and derpp configs use the same mem_size /
+    batch_size_mem.
+One optimizer with ONE parameter group over ``model.parameters()``: Avalanche's
+``reset_optimizer`` rebuilds group 0 from all ``model.named_parameters()`` before each
+experience anyway; frozen parameters (``requires_grad=False``) keep ``grad=None`` and SGD/Adam
+skip them. Class-IL eval-time masking of not-yet-seen classes is done uniformly for every method
+by ``clns.evaluation.plugins.EvalClassMaskPlugin``.
 """
 from __future__ import annotations
 
 import logging
 
+from avalanche.training.plugins import ReplayPlugin
+from avalanche.training.storage_policy import ClassBalancedBuffer, ReservoirSamplingBuffer
+from avalanche.training.supervised import DER, EWC, LwF, Naive
 from omegaconf import OmegaConf
 from torch.nn import CrossEntropyLoss
 from torch.optim import SGD, Adam
 
-from avalanche.training.plugins import ReplayPlugin
-from avalanche.training.storage_policy import ClassBalancedBuffer, ReservoirSamplingBuffer
-from avalanche.training.supervised import EWC, LearningToPrompt, LwF, Naive
-
-from clns.models.vit import get_timm_name
+from clns.strategies.plugins import LwFTeacherEvalPlugin
 
 log = logging.getLogger(__name__)
 
-METHODS = ("naive", "ewc", "lwf", "er", "l2p")
+METHODS = ("naive", "ewc", "lwf", "er", "derpp")
 
 
 def _build_optimizer(model, cfg_train):
@@ -44,14 +50,16 @@ def _build_optimizer(model, cfg_train):
 
 def _build_storage(cfg_method, scenario):
     mem_size = int(cfg_method.mem_size)
-    storage = str(cfg_method.get("storage", "reservoir"))
+    storage = str(cfg_method.get("storage", "class_balanced"))
     if storage == "reservoir":
         return ReservoirSamplingBuffer(max_size=mem_size)
     if storage == "class_balanced":
         if scenario == "domain_il":
-            log.warning(
-                "method.storage=class_balanced with a domain_il scenario: class-balanced "
-                "sampling ignores domain composition and may under-represent old domains."
+            log.info(
+                "method.storage=class_balanced with a domain_il scenario: ClassBalancedBuffer "
+                "keeps a per-class reservoir, so old domains stay in the buffer roughly in "
+                "proportion to how many of their samples were seen (no explicit per-domain "
+                "balancing)."
             )
         return ClassBalancedBuffer(max_size=mem_size, adaptive_size=True)
     raise ValueError(f"Unknown method.storage={storage!r}; valid: ['reservoir', 'class_balanced']")
@@ -71,19 +79,17 @@ def build_strategy(
 ):
     """Build the Avalanche strategy (see module docstring).
 
+    ``cfg_model`` and ``num_classes`` are accepted for interface stability (every method trains
+    the model built by ``clns.models.build_model``).
+
     :param n_train_experiences: length of the training stream; used to refuse EWC
         ``mode=separate`` on long streams (> ``method.max_separate_experiences``, default 20).
     """
     method = cfg_method.name
-    model_name = cfg_model.name
-
-    # Validation first.
     if method not in METHODS:
         raise ValueError(f"Unknown method.name={method!r}; valid: {list(METHODS)}")
-    if method == "l2p" and model_name != "vit_b16_l2p":
-        raise ValueError("l2p requires model.name=vit_b16_l2p")
-    if method != "l2p" and model_name == "vit_b16_l2p":
-        raise NotImplementedError("arm B for non-L2P methods: planned, not in this phase")
+    if model is None:
+        raise ValueError("build_strategy needs a model (clns.models.build_model)")
 
     plugins = list(plugins) if plugins else []
     common = dict(
@@ -95,22 +101,6 @@ def build_strategy(
         evaluator=evaluator,
         eval_every=cfg_train.get("eval_every", -1),
     )
-
-    if method == "l2p":
-        # LearningToPrompt owns its model and Adam optimizer: train.optimizer/momentum/
-        # weight_decay are ignored; the learning rate is method.lr.
-        log.info("l2p: train.optimizer is ignored (L2P uses its own Adam with method.lr).")
-        kwargs = OmegaConf.to_container(cfg_method, resolve=True)
-        kwargs.pop("name", None)
-        return LearningToPrompt(
-            model_name=get_timm_name(cfg_model),
-            criterion=CrossEntropyLoss(),
-            pretrained=bool(cfg_model.get("pretrained", True)),
-            num_classes=num_classes,
-            **kwargs,
-            **common,
-        )
-
     optimizer = _build_optimizer(model, cfg_train)
     criterion = CrossEntropyLoss()
     base = dict(model=model, optimizer=optimizer, criterion=criterion, **common)
@@ -118,7 +108,7 @@ def build_strategy(
     if method == "naive":
         return Naive(**base)
     if method == "ewc":
-        mode = str(cfg_method.get("mode", "separate"))
+        mode = str(cfg_method.get("mode", "online"))
         decay = cfg_method.get("decay_factor", None)
         if mode == "online" and decay is None:
             raise ValueError("method.mode=online requires method.decay_factor to be set")
@@ -146,12 +136,27 @@ def build_strategy(
         alpha = cfg_method.alpha
         if OmegaConf.is_config(alpha):
             alpha = OmegaConf.to_container(alpha)
+        base["plugins"] = plugins + [LwFTeacherEvalPlugin()]
         return LwF(alpha=alpha, temperature=float(cfg_method.temperature), **base)
+    if method == "derpp":
+        alpha, beta = float(cfg_method.alpha), float(cfg_method.beta)
+        if alpha <= 0 or beta <= 0:
+            raise ValueError(f"derpp needs method.alpha > 0 and method.beta > 0 (DER++); got "
+                             f"alpha={alpha}, beta={beta}")
+        bsm = cfg_method.get("batch_size_mem", None)
+        return DER(
+            mem_size=int(cfg_method.mem_size),
+            batch_size_mem=None if bsm is None else int(bsm),
+            alpha=alpha,
+            beta=beta,
+            **base,
+        )
     # er
+    bsm = cfg_method.get("batch_size_mem", None)
     replay = ReplayPlugin(
         mem_size=int(cfg_method.mem_size),
         batch_size=None,
-        batch_size_mem=cfg_method.get("batch_size_mem", None),
+        batch_size_mem=None if bsm is None else int(bsm),
         storage_policy=_build_storage(cfg_method, scenario),
     )
     base["plugins"] = plugins + [replay]

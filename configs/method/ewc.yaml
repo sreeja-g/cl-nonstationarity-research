@@ -1,12 +1,11 @@
 name: ewc
-# TBD (tune on held-out experiences)
+# TBD (tune on held-out experiences: configs/experiment/tune.yaml)
 ewc_lambda: 1000
-mode: separate        # separate | online (online requires decay_factor)
-decay_factor: null    # required for mode=online, e.g. 0.9
-# GPU memory: mode=separate stores, PER TRAINING EXPERIENCE, one Fisher importance tensor and one
-# copy of the parameters on the training device: 2 x 11.2M params x 4 B ~= 89 MB per experience
-# for ResNet-18 (~0.9 GB after 10 experiences, ~7 GB after 79 CORe50 batches). mode=online keeps
-# a single decayed importance + one parameter copy (~89 MB total). Runs with more training
-# experiences than max_separate_experiences and mode=separate are refused at build time
-# (ValueError) -> use mode=online with decay_factor for CORe50 NIC.
+# online on EVERY benchmark (one decayed importance matrix + one parameter copy, ~89 MB for
+# ResNet-18). mode=separate stores one importance tensor + one parameter copy PER training
+# experience (~0.9 GB after 10 ResNet-18 experiences, ~7 GB after 79 CORe50 batches); runs with
+# more training experiences than max_separate_experiences and mode=separate are refused at
+# build time (ValueError).
+mode: online          # online | separate (online requires decay_factor)
+decay_factor: 0.9
 max_separate_experiences: 20

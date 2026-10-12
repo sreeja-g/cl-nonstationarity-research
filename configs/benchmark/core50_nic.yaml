@@ -9,9 +9,9 @@ image_size: 128
 train_transform: resize_train
 eval_transform: resize_eval
 variant: nicv2_79            # nicv2_79 | nicv2_196 | nicv2_391 | nic
-run: 0                       # 0..9 (Avalanche predefined orderings)
+run: null                    # null: NIC run = training seed (task order follows the seed); int 0..9 pins one run
 data_subdir: core50
 allow_download: false
-normalization: imagenet      # imagenet | vit (mean=std=0.5); train.py forces vit + image_size 224 for model=vit_b16_l2p
+normalization: imagenet      # pretrained model arms copy model.normalization here (train.py)
 subsample_seed: 0            # fixed seed of TEST subsampling (independent of the training seed)
 require_done_marker: true    # need <data_dir>/<data_subdir>/.done from scripts/download_data.sh

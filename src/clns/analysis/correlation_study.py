@@ -6,14 +6,16 @@ training on TRAIN experience i (shape T_train x T_test). ``test_exp_to_train_exp
 benchmarks; shorter than T_train for CORe50, RESEARCH_LOG 7.2.1).
 
 Shift: ``shift_transitions(M)[k] = M[k, k+1]`` is the (marginal MMD^2) shift of the
-transition INTO train experience k+1; M comes from ``clns.shift.measure_stream``. A run is
-matched to ANY shift result of its benchmark (``<shift-dir>/<benchmark>/seed*/``) whose
-``shift_meta.json`` describes the same benchmark instance as the run's ``provenance.json``
-``benchmark_meta``: same class order (or no class order on both sides, domain-IL), same split
-hashes and T == T_train. The class order is fixed by ``benchmark.class_order_seed``, NOT by the
-training seed, so one shift measurement per benchmark normally serves every training seed. If
-several shift results match, the one measured with the run's own seed is preferred; several
-matches without that tie-break, or none at all, are an error (:func:`select_shift`).
+transition INTO train experience k+1; M comes from ``clns.shift.measure_stream``, which must be
+run ONCE PER RUN SEED (``--seed k``): the task order follows the training seed (CLEAR-10's time
+order does not, so its seeds share one order). A run is matched to ANY shift result of its
+benchmark (``<shift-dir>/<benchmark>/seed*/``) whose ``shift_meta.json`` describes the same
+benchmark instance as the run's ``provenance.json`` ``benchmark_meta``: same class order (or no
+class order on both sides, domain-IL), same split hashes including ``task_order_sha256`` (a run
+without one never pairs with a shift that has one) and T == T_train. If several shift results
+match, the one measured with the run's own seed is preferred; several matches without that
+tie-break, or none at all, skip that run with a warning (counted per benchmark in
+``n_runs_shift_mismatch``; ``--strict`` raises instead, :func:`select_shift`).
 
 Forgetting, two pairings with transition k = m_j:
 
@@ -30,19 +32,18 @@ Unit of analysis = the TRANSITION (avoids pseudo-replication: the runs of one
 stratum share the same T-1 transitions, so pooling run-level pairs inflates n and
 gave a false-positive rate of ~0.8 under the null in review). Primary analysis, per
 stratum (benchmark, model, method): forgetting is averaged over the seeds that share
-a transition (same class order => same transition; different class orders, e.g. a changed
-``class_order_seed``, make different transitions), the shift of a transition is averaged over
-the matched shift matrices of those seeds, and Spearman is computed over transitions. The permutation p-value
-permutes the shift values across transitions (n = n_transitions); the bootstrap CI
-resamples transitions (optionally two-way: runs, then transitions). Pooling
+a transition (transition identity = the pair of tasks it moves between, see
+:func:`clns.analysis.transitions.transition_id`; seeds with different task orders make different
+transitions, CLEAR-10 seeds share them), the shift of a transition is averaged over
+the matched shift matrices of those seeds, and Spearman is computed over transitions. The
+permutation p-value permutes the shift values across transitions (n = n_transitions); the
+bootstrap CI resamples transitions (optionally two-way: runs, then transitions). Pooling
 models/methods is only done with ``--scope pooled`` and is flagged in the output.
 """
 
 from __future__ import annotations
 
 import argparse
-import json
-import re
 import sys
 import warnings
 from pathlib import Path
@@ -51,272 +52,25 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 
-FORGETTING_MODES = ("one_step", "cumulative")
-
-
-# --------------------------------------------------------------------------- #
-# Loading
-# --------------------------------------------------------------------------- #
-def load_accuracy_matrices(runs_dir) -> list[dict]:
-    """Load finished runs under ``runs_dir/<benchmark>/<model>/<method>/seed<k>/``.
-
-    Runs without a ``DONE`` marker are skipped with a warning. Each record has keys
-    benchmark, model, method, seed, path, rows (np.ndarray T_train x T_test),
-    test_exp_to_train_exp (list[int]), scenario, random_init, benchmark_meta (from
-    ``provenance.json``; None if absent).
-    """
-    runs_dir = Path(runs_dir)
-    records = []
-    for p in sorted(runs_dir.glob("*/*/*/seed*/accuracy_matrix.json")):
-        run = p.parent
-        m = re.fullmatch(r"seed(\d+)", run.name)
-        if m is None:
-            continue
-        if not (run / "DONE").exists():
-            warnings.warn(f"skipping unfinished run (no DONE): {run}", stacklevel=2)
-            continue
-        with open(p, encoding="utf-8") as fh:
-            blob = json.load(fh)
-        rows = np.asarray(blob["rows"], dtype=float)
-        mapping = blob.get("test_exp_to_train_exp")
-        if mapping is None:
-            mapping = list(range(rows.shape[1]))
-        bmeta = None
-        prov = run / "provenance.json"
-        if prov.exists():
-            with open(prov, encoding="utf-8") as fh:
-                bmeta = json.load(fh).get("benchmark_meta")
-        records.append(
-            {
-                "benchmark": run.parent.parent.parent.name,
-                "model": run.parent.parent.name,
-                "method": run.parent.name,
-                "seed": int(m.group(1)),
-                "path": str(p),
-                "rows": rows,
-                "test_exp_to_train_exp": [int(v) for v in mapping],
-                "scenario": blob.get("scenario"),
-                "random_init": blob.get("random_init"),
-                "benchmark_meta": bmeta,
-            }
-        )
-    return records
-
-
-def load_shift(shift_dir, benchmark: str, seed: int) -> dict | None:
-    """Shift matrix + meta of ``<shift_dir>/<benchmark>/seed<seed>/``; None if not present.
-
-    Layout written by ``clns.shift.measure_stream``:
-    ``<shift_dir>/<benchmark>/seed<k>/{shift_matrix.npz, shift_meta.json}``.
-    """
-    d = Path(shift_dir) / benchmark / f"seed{seed}"
-    npz, meta = d / "shift_matrix.npz", d / "shift_meta.json"
-    if not npz.exists() or not meta.exists():
-        return None
-    with open(meta, encoding="utf-8") as fh:
-        m = json.load(fh)
-    return {"matrix": np.load(npz)["matrix"], "meta": m, "dir": str(d), "seed": int(seed)}
-
-
-def load_shift_candidates(shift_dir, benchmark: str) -> list[dict]:
-    """All shift results of ``benchmark`` (every ``seed<k>`` directory), sorted by seed."""
-    root = Path(shift_dir) / benchmark
-    if not root.is_dir():
-        return []
-    out = []
-    for d in root.glob("seed*"):
-        m = re.fullmatch(r"seed(\d+)", d.name)
-        if m is None:
-            continue
-        sh = load_shift(shift_dir, benchmark, int(m.group(1)))
-        if sh is not None:
-            out.append(sh)
-    return sorted(out, key=lambda sh: sh["seed"])
-
-
-def _order(o):
-    return None if o is None else [int(c) for c in o]
-
-
-def shift_mismatch(shift: dict, rec: dict) -> str | None:
-    """Why ``shift`` does NOT describe the run's benchmark instance; None if it does.
-
-    Compared against the run's ``provenance.json`` ``benchmark_meta``: T (shift) == T_train
-    (run); equal class order (absent on both sides, domain-IL, counts as equal); every split
-    hash the shift records equals the run's value where the run records it. The benchmark
-    seed is NOT compared: the class order is fixed by ``benchmark.class_order_seed``. A run
-    without ``benchmark_meta`` cannot be verified and never matches.
-    """
-    meta = shift["meta"]
-    t_shift = int(meta.get("T", np.asarray(shift["matrix"]).shape[0]))
-    t_train = int(np.asarray(rec["rows"]).shape[0])
-    if t_shift != t_train:
-        return f"shift T={t_shift} != run T_train={t_train}"
-    bmeta = rec.get("benchmark_meta")
-    if bmeta is None:
-        return "run has no provenance benchmark_meta; cannot verify class order / split hashes"
-    if _order(meta.get("class_order")) != _order(bmeta.get("class_order")):
-        return "class_order mismatch between run and shift matrix"
-    for k, v in (meta.get("split_hashes") or {}).items():
-        if k in bmeta and str(bmeta[k]) != str(v):
-            return f"split hash {k} mismatch between run and shift matrix"
-    return None
-
-
-def check_shift_matches_run(shift: dict, rec: dict) -> None:
-    """Raise ValueError unless the shift matrix belongs to the run's benchmark instance."""
-    why = shift_mismatch(shift, rec)
-    if why is not None:
-        raise ValueError(f"{why} ({rec['path']} vs {shift['dir']})")
-
-
-def select_shift(candidates: list[dict], rec: dict) -> dict:
-    """The shift result to pair with run ``rec`` (matching rule: :func:`shift_mismatch`).
-
-    Exactly one match -> it. Several matches -> the one measured with the run's own seed
-    (``seed<k>`` dir == run seed), else ValueError (conflicting). No match -> ValueError
-    listing why each candidate was rejected.
-    """
-    ok, rejected = [], []
-    for sh in candidates:
-        why = shift_mismatch(sh, rec)
-        if why is None:
-            ok.append(sh)
-        else:
-            rejected.append(f"{sh['dir']}: {why}")
-    if len(ok) == 1:
-        return ok[0]
-    if len(ok) > 1:
-        same = [sh for sh in ok if sh["seed"] == int(rec["seed"])]
-        if len(same) == 1:
-            return same[0]
-        raise ValueError(
-            f"conflicting shift results for {rec['path']}: {[sh['dir'] for sh in ok]} all "
-            "match its class order / split hashes / T and none was measured with the run's "
-            "seed; keep only one of them"
-        )
-    raise ValueError(f"no shift result matches {rec['path']}: " + "; ".join(rejected))
-
-
-# --------------------------------------------------------------------------- #
-# Forgetting / alignment
-# --------------------------------------------------------------------------- #
-def _mapping(a: np.ndarray, test_exp_to_train_exp) -> np.ndarray:
-    t_train, t_test = a.shape
-    mapping = np.arange(t_test) if test_exp_to_train_exp is None else np.asarray(
-        test_exp_to_train_exp, dtype=int
-    )
-    if mapping.shape[0] != t_test:
-        raise ValueError(
-            f"mapping length {mapping.shape[0]} != number of test experiences {t_test}"
-        )
-    if mapping.size and (mapping.min() < 0 or mapping.max() >= t_train):
-        raise ValueError("mapping entries must lie in [0, T_train)")
-    return mapping
-
-
-def forgetting(a, test_exp_to_train_exp=None) -> tuple[np.ndarray, np.ndarray]:
-    """CUMULATIVE forgetting per test experience (secondary; position-confounded).
-
-    f_j = max_{m_j <= i <= T_train-2} a[i][j] - a[T_train-1][j]; NaN where
-    m_j >= T_train - 1. Returns (f, mapping).
-    """
-    a = np.asarray(a, dtype=float)
-    t_train, t_test = a.shape
-    mapping = _mapping(a, test_exp_to_train_exp)
-    f = np.full(t_test, np.nan)
-    for j in range(t_test):
-        m_j = int(mapping[j])
-        if m_j < t_train - 1:
-            f[j] = a[m_j : t_train - 1, j].max() - a[t_train - 1, j]
-    return f, mapping
-
-
-def one_step_forgetting(a, test_exp_to_train_exp=None) -> tuple[np.ndarray, np.ndarray]:
-    """ONE-STEP forgetting per test experience (primary pairing).
-
-    d_j = a[m_j][j] - a[m_j+1][j], the drop right after the next transition
-    m_j -> m_j+1; NaN where m_j >= T_train - 1. Returns (d, mapping).
-    """
-    a = np.asarray(a, dtype=float)
-    t_train, t_test = a.shape
-    mapping = _mapping(a, test_exp_to_train_exp)
-    d = np.full(t_test, np.nan)
-    for j in range(t_test):
-        m_j = int(mapping[j])
-        if m_j < t_train - 1:
-            d[j] = a[m_j, j] - a[m_j + 1, j]
-    return d, mapping
-
-
-def shift_transitions(shift_matrix) -> np.ndarray:
-    """First off-diagonal of the shift matrix: M[k, k+1] for k = 0..T-2."""
-    return np.diag(np.asarray(shift_matrix, dtype=float), k=1)
-
-
-def align_forgetting_with_transitions(f, mapping, transitions) -> tuple[np.ndarray, np.ndarray]:
-    """Pair forgetting of test exp j with transition index m_j (into train exp m_j+1).
-
-    Returns (shift_vec, forget_vec) for all j with finite f_j and m_j < len(transitions).
-    """
-    f = np.asarray(f, dtype=float)
-    mapping = np.asarray(mapping, dtype=int)
-    transitions = np.asarray(transitions, dtype=float)
-    keep = np.isfinite(f) & (mapping < len(transitions))
-    return transitions[mapping[keep]], f[keep]
-
-
-def run_transition_table(rec: dict, transitions, mode: str = "one_step") -> pd.DataFrame:
-    """Per-run table: one row per transition k with forgetting (mean over test exps j
-    with m_j = k), the shift M[k, k+1] and the position covariate T_train-1-k.
-
-    Rows with non-finite forgetting or shift are kept (NaN) so callers can count drops.
-    """
-    if mode not in FORGETTING_MODES:
-        raise ValueError(f"mode must be one of {FORGETTING_MODES}, got {mode!r}")
-    fn = one_step_forgetting if mode == "one_step" else forgetting
-    a = np.asarray(rec["rows"], dtype=float)
-    f, mp = fn(a, rec["test_exp_to_train_exp"])
-    transitions = np.asarray(transitions, dtype=float)
-    t_train = a.shape[0]
-    rows = []
-    for k in sorted(set(int(m) for m in mp if m < t_train - 1)):
-        vals = f[mp == k]
-        vals = vals[np.isfinite(vals)]
-        rows.append(
-            {
-                "k": k,
-                "forget": float(vals.mean()) if vals.size else float("nan"),
-                "shift": float(transitions[k]) if k < len(transitions) else float("nan"),
-                "position": t_train - 1 - k,
-            }
-        )
-    return pd.DataFrame(rows, columns=["k", "forget", "shift", "position"])
-
-
-def transition_id(rec: dict, k: int) -> str:
-    """Identity of transition k of a run: runs share it iff they share the class order.
-
-    Domain-IL benchmarks (no class order) share transition k across all seeds.
-    """
-    bmeta = rec.get("benchmark_meta") or {}
-    order = bmeta.get("class_order")
-    tag = "fixed" if order is None else ",".join(str(c) for c in order)
-    return f"{tag}|{k}"
-
-
-def aggregate_transitions(table: pd.DataFrame) -> pd.DataFrame:
-    """Collapse a run-level table (columns unit, forget, shift, position, run) to one
-    row per transition unit: mean forgetting and mean shift over runs."""
-    g = table.groupby("unit", sort=True)
-    return pd.DataFrame(
-        {
-            "shift": g["shift"].mean(),
-            "forget": g["forget"].mean(),
-            "position": g["position"].first(),
-            "n_runs": g["run"].nunique(),
-        }
-    ).reset_index()
+# The transition table (loading, shift matching, forgetting, transition identity) lives in
+# clns.analysis.transitions so that hypotheses.py pairs forgetting with shift identically; the
+# names stay importable from here.
+from clns.analysis.transitions import (  # noqa: F401
+    FORGETTING_MODES,
+    aggregate_transitions,
+    align_forgetting_with_transitions,
+    check_shift_matches_run,
+    forgetting,
+    load_accuracy_matrices,
+    load_shift,
+    load_shift_candidates,
+    one_step_forgetting,
+    run_transition_table,
+    select_shift,
+    shift_mismatch,
+    shift_transitions,
+    transition_id,
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -466,16 +220,20 @@ def _note(mode: str, scope: str) -> str:
     return "; ".join(parts)
 
 
-def build_run_table(recs, shift_dir, mode: str) -> tuple[pd.DataFrame, dict]:
+def build_run_table(recs, shift_dir, mode: str, strict: bool = False
+                    ) -> tuple[pd.DataFrame, dict]:
     """Run-level transition table for all records with matching shift matrices.
 
     Each run is paired with the shift result of its benchmark chosen by :func:`select_shift`
     (any seed dir with the same class order / split hashes / T; the run's own seed preferred).
-    Returns (table, counts). A benchmark without any shift result is skipped with a warning;
-    raises ValueError if shift results exist but none (or several, conflicting) match a run.
+    Returns (table, counts). A benchmark without any shift result is skipped with a warning. A
+    run whose shift results exist but none (or several, conflicting) match is skipped with a
+    warning and counted per benchmark (``counts["n_runs_shift_mismatch"]``); ``strict`` raises
+    the ValueError instead.
     """
     frames = []
-    counts = {"runs_missing_shift": 0, "pairs_nan": 0, "pairs_total": 0}
+    counts = {"runs_missing_shift": 0, "pairs_nan": 0, "pairs_total": 0,
+              "n_runs_shift_mismatch": {}}
     cache: dict = {}
     for r in recs:
         if r["benchmark"] not in cache:
@@ -487,7 +245,15 @@ def build_run_table(recs, shift_dir, mode: str) -> tuple[pd.DataFrame, dict]:
             )
             counts["runs_missing_shift"] += 1
             continue
-        shift = select_shift(candidates, r)
+        try:
+            shift = select_shift(candidates, r)
+        except ValueError as exc:
+            if strict:
+                raise
+            warnings.warn(f"skipping run (shift mismatch): {exc}", stacklevel=2)
+            mism = counts["n_runs_shift_mismatch"]
+            mism[r["benchmark"]] = mism.get(r["benchmark"], 0) + 1
+            continue
         t = run_transition_table(r, shift_transitions(shift["matrix"]), mode)
         counts["pairs_total"] += len(t)
         counts["pairs_nan"] += int((~(np.isfinite(t["shift"]) & np.isfinite(t["forget"]))).sum())
@@ -497,8 +263,8 @@ def build_run_table(recs, shift_dir, mode: str) -> tuple[pd.DataFrame, dict]:
             run=run_id, unit=[transition_id(r, int(k)) for k in t["k"]],
         )
         frames.append(t)
-    cols = ["k", "forget", "shift", "position", "benchmark", "model", "method", "seed", "run",
-            "unit"]
+    cols = ["k", "forget", "shift", "position", "a_tt", "t", "benchmark", "model", "method",
+            "seed", "run", "unit"]
     table = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=cols)
     return table, counts
 
@@ -521,13 +287,15 @@ def main(argv=None) -> int:
     ap.add_argument("--n-boot", type=int, default=1000)
     ap.add_argument("--n-perm", type=int, default=10000)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--strict", action="store_true",
+                    help="raise on a run whose shift result does not match (default: skip, count)")
     args = ap.parse_args(argv)
 
     recs = load_accuracy_matrices(args.runs_dir)
     if not recs:
         print(f"error: no finished runs (with DONE) under {args.runs_dir}", file=sys.stderr)
         return 1
-    table, counts = build_run_table(recs, args.shift_dir, args.forgetting)
+    table, counts = build_run_table(recs, args.shift_dir, args.forgetting, args.strict)
     if table.empty:
         print(f"error: no run could be matched to a shift matrix under {args.shift_dir}",
               file=sys.stderr)
@@ -557,12 +325,14 @@ def main(argv=None) -> int:
             n_run_pairs_nan=int((~(np.isfinite(sub["shift"]) & np.isfinite(sub["forget"]))).sum()),
             measure="marginal_mmd", cross_benchmark_comparable=False,
             ci_method="two_way" if args.two_way_bootstrap else "transitions",
+            n_runs_shift_mismatch=int(counts["n_runs_shift_mismatch"].get(bench, 0)),
             note=_note(args.forgetting, args.scope),
         )
         rows.append(res)
     print(
         f"runs: {len(recs)} loaded, {counts['runs_missing_shift']} without shift matrix; "
-        f"run-level pairs: {counts['pairs_total']} total, {counts['pairs_nan']} NaN (dropped)"
+        f"run-level pairs: {counts['pairs_total']} total, {counts['pairs_nan']} NaN (dropped); "
+        f"shift mismatch skipped: {counts['n_runs_shift_mismatch'] or 0}"
     )
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
     pd.DataFrame(rows).to_csv(args.out, index=False)

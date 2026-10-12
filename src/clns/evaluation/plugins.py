@@ -289,9 +289,8 @@ class EvalClassMaskPlugin(_TrainingFlagMixin, SupervisedPlugin):
       * before any training (random-init row ``b``) NO mask is applied: all classes compete;
       * test experiences made only of unseen classes get accuracy exactly 0 and an infinite
         loss (non-finite values are skipped by JSONLLogger);
-      * applies to every method, including L2P: Avalanche 0.6.0 ``LearningToPrompt.forward``
-        masks to ``classes_in_this_experience`` only while TRAINING (``use_mask and
-        is_training``), never at evaluation.
+      * applies identically to every method (naive, ewc, lwf, er, derpp); no method masks
+        logits at training time.
     Attached only for class-IL and ``train.eval_mask_unseen=true`` (default).
     """
 

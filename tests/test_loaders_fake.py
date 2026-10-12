@@ -47,9 +47,11 @@ def test_imagenet100_fake(tmp_path, load_benchmark_cfg):
     assert len(bm.train_stream) == 10 and len(bm.test_stream) == 10
     assert bundle.meta["train_sizes"] == [20] * 10 and bundle.meta["test_sizes"] == [20] * 10
     assert bundle.meta["class_order_seed"] == 1993
-    # class order independent of the training seed
+    # class order follows the training seed (seed 0 = committed UCIR/PODNet order)
     other = build_benchmark(_in_cfg(load_benchmark_cfg), str(tmp_path), seed=4)
-    assert other.class_order == bundle.class_order
+    assert other.class_order != bundle.class_order
+    assert bundle.meta["task_order"] == bundle.class_order
+    assert bundle.meta["task_order_sha256"] != other.meta["task_order_sha256"]
     for k, exp in enumerate(bm.train_stream):
         assert exp.classes_in_this_experience == sorted(bundle.class_order[10 * k : 10 * k + 10])
     x, y, t = bm.test_stream[0].dataset[0]
@@ -120,3 +122,39 @@ def test_domainnet_leak_detected(tmp_path, load_benchmark_cfg):
     cfg = load_benchmark_cfg("domainnet", num_classes=2, image_size=16)
     with pytest.raises(ValueError, match="leakage in DomainNet/painting"):
         build_benchmark(cfg, str(tmp_path), 0)
+
+
+def _test_image_set(bundle, root) -> set:
+    from clns.shift.feature_cache import sample_ids
+
+    return {i for e in bundle.benchmark.test_stream for i in sample_ids(e.dataset, str(root))}
+
+
+def test_imagenet100_test_subsample_same_for_all_seeds(tmp_path, load_benchmark_cfg):
+    """subsample_per_class: every training seed (= another class order) sees the same test
+    images; the training subsample still follows the seed."""
+    _fake_imagenet(tmp_path / "ILSVRC2012", n_train=3, n_val=4)
+    cfg = _in_cfg(load_benchmark_cfg, val_images_per_class=4, subsample_per_class=2)
+    b0, b1 = (build_benchmark(cfg, str(tmp_path), s) for s in (0, 1))
+    assert b0.class_order != b1.class_order
+    t0, t1 = _test_image_set(b0, tmp_path), _test_image_set(b1, tmp_path)
+    assert len(t0) == 200 and t0 == t1
+
+
+def test_domainnet_seed_order_and_test_subsample(tmp_path, load_benchmark_cfg):
+    from clns.data.domainnet import domainnet_domain_order
+    from clns.shift.feature_cache import sample_ids
+
+    committed = _fake_domainnet(tmp_path / "domainnet")
+    cfg = load_benchmark_cfg("domainnet", num_classes=2, image_size=16, subsample_per_class=1)
+    b0, b2 = (build_benchmark(cfg, str(tmp_path), s) for s in (0, 2))
+    expected = domainnet_domain_order(committed, 2)
+    assert expected != committed and b2.meta["domain_order"] == expected
+    assert b2.meta["task_order"] == expected
+    assert b2.meta["task_order_sha256"] != b0.meta["task_order_sha256"]
+    # the train stream really follows the seed's domain order (ids are <domain>/class/...)
+    for k, exp in enumerate(b2.benchmark.train_stream):
+        doms = {i.split(":", 1)[1].split("/")[1] for i in sample_ids(exp.dataset, str(tmp_path))}
+        assert doms == {expected[k]}
+    # the test subsample of a domain does not depend on its position in the order
+    assert _test_image_set(b0, tmp_path) == _test_image_set(b2, tmp_path)

@@ -1,0 +1,19 @@
+# Arm r18_places: ResNet-18, Places365 init, last block trainable.
+# Allowed benchmarks: clns.models.ALLOWED.
+name: r18_places
+arch: resnet18
+init: places365
+# last_block: ResNet layer4 + fc; MobileNetV2 features.17 + features.18 + classifier
+# (clns.models.freezing.LAST_BLOCK). Frozen part: requires_grad=False + FrozenBatchNorm2d.
+trainable: last_block
+# weights_file: in ${paths.weights_dir}; CSAIL release, fetched by scripts/download_data.sh
+weights_file: resnet18_places365.pth.tar
+# Pin after the first download (sha256sum <weights_dir>/<weights_file>) and BEFORE the first GPU
+# run of this arm: it is part of the run fingerprint, so changing it later makes existing run
+# dirs of this arm refuse to resume/skip (exit 4). null only warns; the actual hash is always
+# recorded in provenance.json (weights.sha256).
+weights_sha256: 2f4759217d470da2b803f8f66cd4488a066406b555a5fb95ee9a4663f9f05588  # CSAIL file, verified 2026-10-11
+image_size: null         # null -> benchmark.image_size (every arm runs at the benchmark's
+                         # resolution: CORe50 128 px, the others 224 px)
+normalization: imagenet  # copied into benchmark.normalization by train.py
+cifar_stem: false        # pretrained stem; train.py resets true (experiment=smoke) to false

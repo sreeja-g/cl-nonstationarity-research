@@ -12,6 +12,6 @@ protocol: iid                # ONLY iid: 'streaming' makes test == train (leakag
 split_seed: 0                # CLEAR train/test split seed, 0..4
 data_subdir: clear10
 allow_download: false
-normalization: imagenet      # imagenet | vit (mean=std=0.5); train.py forces vit + image_size 224 for model=vit_b16_l2p
+normalization: imagenet      # pretrained model arms copy model.normalization here (train.py)
 subsample_seed: 0            # fixed seed of TEST subsampling (independent of the training seed)
 require_done_marker: true    # need <data_dir>/<data_subdir>/.done from scripts/download_data.sh

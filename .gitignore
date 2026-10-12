@@ -40,8 +40,9 @@ checkpoints/
 # -----------------------------
 # Data (VERY IMPORTANT)
 # -----------------------------
-data/
-datasets/
+# anchored to the repo root so it does not match the src/clns/data package
+/data/
+/datasets/
 *.csv
 *.h5
 *.npz
@@ -80,3 +81,6 @@ dist/
 .env.*
 kaggle.json
 .secrets/
+
+# Pretrained weight files (downloaded by scripts/download_data.sh; checksums pinned in configs)
+/weights/

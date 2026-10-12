@@ -11,8 +11,9 @@ eval_transform: resize_eval
 num_classes: 345
 domain_order_file: domain_order.txt     # data_splits/domainnet/
 domain_order_sha256: 7b5ab671e812d6e677e30f2762cb99b922de6b467da72493e9a8dfb78629d114
+domain_order_seed: 0         # seed 0: committed order; seed k>0: default_rng([domain_order_seed, k]) permutation
 data_subdir: domainnet
 filelist_dir: splits         # <root>/splits/<domain>_{train,test}.txt (cleaned official lists)
-normalization: imagenet      # imagenet | vit (mean=std=0.5); train.py forces vit + image_size 224 for model=vit_b16_l2p
+normalization: imagenet      # pretrained model arms copy model.normalization here (train.py)
 subsample_seed: 0            # fixed seed of TEST subsampling (independent of the training seed)
 require_done_marker: true    # need <data_dir>/<data_subdir>/.done from scripts/download_data.sh

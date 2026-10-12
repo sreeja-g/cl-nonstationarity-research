@@ -47,7 +47,14 @@ def test_deterministic_and_seed_dependent(load_benchmark_cfg):
     xc = c.benchmark.train_stream[0].dataset[0][0]
     assert bool((xa == xb).all())
     assert not bool((xa == xc).all())  # data depends on the training seed ...
-    assert a.class_order == c.class_order  # ... the class order does not (class_order_seed)
+    assert a.class_order != c.class_order  # ... and so does the class order (like ImageNet-100)
+    from clns.data.synthetic import synthetic_class_order
+
+    assert a.class_order == synthetic_class_order(1993, 1)
+    seed0 = build_benchmark(cfg, "unused", 0).class_order
+    import numpy as np
+
+    assert seed0 == [int(k) for k in np.random.RandomState(1993).permutation(10)]  # unchanged
 
 
 def test_class_order_seed(load_benchmark_cfg):
@@ -63,7 +70,7 @@ def test_classes_timeline_on_every_stream(load_benchmark_cfg):
     for name in ("train_stream", "valid_stream", "test_stream"):
         for k, exp in enumerate(getattr(bm, name)):
             cls = exp.classes_in_this_experience
-            assert isinstance(cls, list)  # sorted list, not set (L2P np.setdiff1d)
+            assert isinstance(cls, list)  # sorted list, not set (deterministic)
             assert cls == sorted(bundle.class_order[2 * k : 2 * k + 2])
     assert bundle.meta["train_classes"][0] == sorted(bundle.class_order[:2])
 

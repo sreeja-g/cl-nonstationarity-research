@@ -1,3 +1,6 @@
 # @package paths
 data_dir: ${oc.env:CLNS_DATA_DIR,/workspace/data}
 output_dir: ${oc.env:CLNS_OUTPUT_DIR,/workspace/outputs}
+# Pretrained weights (Places365 CSAIL checkpoints, torchvision ImageNet cache). Only read by
+# pretrained model arms.
+weights_dir: ${oc.env:CLNS_WEIGHTS_DIR,/workspace/weights}

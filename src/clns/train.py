@@ -3,25 +3,35 @@
 Usage (editable install, ``pip install -e .``; ``config_path`` is resolved relative to this
 file, i.e. ``<repo>/configs``, so a non-editable install cannot find the configs)::
 
-    python -m clns.train benchmark=imagenet100 method=er model=resnet18 seed=0
+    python -m clns.train benchmark=imagenet100 method=er model=r18_scratch seed=0
     python -m clns.train experiment=smoke                 # tiny synthetic run (-> <output>/smoke)
     clns-train experiment=smoke logger=wandb_offline      # console script, same thing
 
 Run directory (contract): ``${paths.output_dir}/runs/<benchmark>/<model>/<method>/seed<seed>/``
-holding config.yaml, provenance.json, fingerprint.json, RUNNING.lock, checkpoint.pt,
-progress.json, accuracy_matrix.json, per_class_matrix.json, valid_matrix.json
-(``train.eval_valid`` only), metrics.jsonl, summary.json, wandb_run_id.txt (W&B only), log.txt,
-failure.json (failed attempts only; removed on success) and DONE (success only). No ``.hydra/``
+holding config.yaml, provenance.json, fingerprint.json, RUNNING.lock, checkpoint.pt (deleted
+once DONE is written), progress.json, accuracy_matrix.json, per_class_matrix.json, valid_matrix.json
+(``train.eval_valid`` only), probe/ (``train.probe.enabled``; meta.npz + one row_XXXX.npz of
+penultimate features of a fixed probe set per experience, see clns.evaluation.probe), metrics.jsonl,
+summary.json, wandb_run_id.txt (W&B only), log.txt, failure.json (failed attempts only; removed
+on success) and DONE (success only). No ``.hydra/``
 (``hydra.output_subdir: null``): config.yaml + provenance.json are the config record.
 ``experiment=smoke*`` configs write under ``<output_dir>/smoke/runs/...`` so smoke results never
 share a directory with real runs.
 
-Flow: model-specific overrides (L2P: image_size 224 + ViT normalization) -> lock RUNNING.lock ->
+Flow: model-driven overrides (non-null model.image_size / model.normalization copied into the
+benchmark config, e.g. ImageNet statistics for pretrained arms; model.cifar_stem reset to false for
+pretrained arms) -> pre-flight model check (``clns.models.validate_model_config``: arm x benchmark,
+canonical arm spec, Places365 weights file present; exit 2 BEFORE the run dir is created) ->
+lock RUNNING.lock ->
 config fingerprint check (BEFORE the DONE check) -> DONE? exit 0 -> device -> seed ->
 provenance -> build data/loggers/evaluator/model/strategy -> load checkpoint -> truncate
 outputs to the checkpoint -> (fresh run) eval FULL test stream = random-init row -> for each
 remaining training experience: re-seed from (seed, exp), train, eval FULL test stream (+ valid
-stream if ``train.eval_valid``), checkpoint, progress.json -> summary.json -> DONE.
+stream if ``train.eval_valid``), probe features (``train.probe``), checkpoint, progress.json ->
+summary.json -> DONE -> delete checkpoint.pt (a finished run is never resumed; saves disk).
+The model (``clns.models.build_model``) validates the arm x benchmark combination; its
+trainable/total parameter counts (``params``) and loaded weights file + actual sha256
+(``weights``, pretrained arms) are written to provenance.json.
 
 Compute accounting (single source of truth, persisted in progress.json across resumes):
 wall clock and CUDA peak memory (``reset_peak_memory_stats`` before each call) are measured
@@ -32,10 +42,13 @@ the end of the run); time spent in an attempt after its last checkpoint (a crash
 
 Exit codes: 0 success / already done / stopped by ``train.stop_after_experiences``;
 1 any other error (failure.json written, exception re-raised);
+2 invalid model configuration (pre-flight check above): nothing is written, no run dir (the
+``hydra.run.dir`` Hydra creates for its own train.log is removed again if it holds nothing else);
+same meaning as run_grid.sh's own exit 2 (usage/config error), not retried there;
 3 CUDA out-of-memory (failure.json written);
 4 config fingerprint mismatch: run_dir holds a run with a different (non-volatile) config;
 5 run directory locked by another live process (RUNNING.lock);
-143 SIGTERM (e.g. ``timeout``, ``run_all_baselines.sh --stop``, container stop): raised as
+143 SIGTERM (e.g. ``timeout``, ``run_grid.sh --stop``, container stop): raised as
 ``SystemExit(143)`` through the failure path -> failure.json (``"interrupted": true``), W&B
 run marked preempting and finished with exit code 143, RUNNING.lock released. The checkpoint of
 the last completed experience is kept, so a re-run resumes.
@@ -74,6 +87,7 @@ log = logging.getLogger("clns.train")
 
 EXIT_OK = 0
 EXIT_ERROR = 1
+EXIT_INVALID_CONFIG = 2
 EXIT_OOM = 3
 EXIT_CONFIG_MISMATCH = 4
 EXIT_LOCKED = 5
@@ -109,11 +123,6 @@ def _install_sigterm_handler():
     except (ValueError, OSError, AttributeError):  # not the main thread / unsupported
         return None
 
-# Same values as clns.models.vit.VIT_IMAGE_SIZE / VIT_NORMALIZATION (kept literal here so the
-# override does not import torch before the lock/fingerprint checks).
-VIT_MODEL_NAME = "vit_b16_l2p"
-VIT_IMAGE_SIZE = 224
-VIT_NORMALIZATION = "vit"
 
 # B2 keys (fixed, used by scripts/smoke_test.sh) + compute/macro additions.
 B2_SUMMARY_KEYS = (
@@ -150,22 +159,33 @@ def resolve_device(name: str):
 def apply_model_overrides(cfg: DictConfig) -> None:
     """Model-driven data settings, applied before the fingerprint so it records them.
 
-    vit_b16_l2p: the timm ViT-B/16 checkpoint needs 224 x 224 inputs normalised with
-    mean = std = 0.5 -> force ``benchmark.image_size=224`` and ``benchmark.normalization=vit``.
+    Non-null ``model.image_size`` / ``model.normalization`` (pretrained arms: ImageNet
+    statistics, the normalisation the weights were trained with) are copied into
+    ``benchmark.image_size`` / ``benchmark.normalization`` (logged when they change a value).
+    Null keeps the benchmark's own setting (image_size is null for every arm: all arms run at
+    the benchmark's resolution). ``model.cifar_stem=true`` (e.g. from ``experiment=smoke``) only
+    applies to scratch arms; for pretrained arms it is reset to false (logged), so the recorded
+    config is what runs. Pure config manipulation: no torch import before the lock/fingerprint
+    checks.
     """
-    if str(cfg.model.name) != VIT_MODEL_NAME:
+    model_cfg = cfg.get("model", None)
+    if model_cfg is None:
         return
     with open_dict(cfg):
-        old_size = cfg.benchmark.get("image_size", None)
-        if old_size is None or int(old_size) != VIT_IMAGE_SIZE:
-            log.warning("model=%s: overriding benchmark.image_size %s -> %d (ViT input size).",
-                        VIT_MODEL_NAME, old_size, VIT_IMAGE_SIZE)
-            cfg.benchmark.image_size = VIT_IMAGE_SIZE
-        old_norm = cfg.benchmark.get("normalization", None)
-        if old_norm != VIT_NORMALIZATION:
-            log.warning("model=%s: overriding benchmark.normalization %s -> %s (mean=std=0.5).",
-                        VIT_MODEL_NAME, old_norm, VIT_NORMALIZATION)
-            cfg.benchmark.normalization = VIT_NORMALIZATION
+        init = str(model_cfg.get("init", "scratch"))
+        if init != "scratch" and bool(model_cfg.get("cifar_stem", False)):
+            log.info("model=%s (init=%s): ignoring model.cifar_stem=true (scratch arms only; "
+                     "the pretrained stem is kept).", model_cfg.get("name"), init)
+            model_cfg.cifar_stem = False
+        for key in ("image_size", "normalization"):
+            new = model_cfg.get(key, None)
+            if new is None:
+                continue
+            old = cfg.benchmark.get(key, None)
+            if old != new:
+                log.warning("model=%s: overriding benchmark.%s %s -> %s (model input pipeline).",
+                            model_cfg.get("name"), key, old, new)
+                cfg.benchmark[key] = new
 
 
 def _is_oom(exc: BaseException) -> bool:
@@ -370,12 +390,34 @@ def build_summary(
 # --------------------------------------------------------------------------- #
 # Entry
 # --------------------------------------------------------------------------- #
+def preflight_model(cfg: DictConfig) -> str | None:
+    """Error message if the model config is invalid for this run, else None (no side effects).
+
+    ``clns.models.validate_model_config``: arm x benchmark, canonical (arch, init, trainable) of
+    ``model.name``, and for Places365 arms that the weights file exists.
+    """
+    from clns.models import validate_model_config
+
+    weights_dir = cfg.paths.get("weights_dir", None)
+    try:
+        validate_model_config(cfg.model, str(cfg.benchmark.name),
+                              None if weights_dir is None else str(weights_dir))
+    except (ValueError, FileNotFoundError) as exc:
+        return str(exc)
+    return None
+
+
 def run(cfg: DictConfig) -> int:
     """Run (or resume) one training job. Returns the process exit code."""
     t_attempt = time.perf_counter()
     run_dir = Path(str(cfg.run_dir))
-    run_dir.mkdir(parents=True, exist_ok=True)
     apply_model_overrides(cfg)
+    error = preflight_model(cfg)
+    if error is not None:
+        log.error("Invalid model configuration, refusing to start (exit %d; run dir %s not "
+                  "created): %s", EXIT_INVALID_CONFIG, run_dir, error)
+        return EXIT_INVALID_CONFIG
+    run_dir.mkdir(parents=True, exist_ok=True)
 
     old_term = _install_sigterm_handler()
     try:
@@ -428,6 +470,13 @@ def _run_locked(cfg: DictConfig, run_dir: Path, t_attempt: float) -> int:
     try:
         from clns.evaluation.evaluator import build_evaluator, build_loggers
         from clns.evaluation.plugins import truncate_jsonl
+        from clns.evaluation.probe import (
+            PROBE_DIR,
+            build_probe_set,
+            extract_probe,
+            truncate_probe,
+            write_probe_row,
+        )
         from clns.models import build_model
         from clns.strategies import build_strategy
 
@@ -459,10 +508,19 @@ def _run_locked(cfg: DictConfig, run_dir: Path, t_attempt: float) -> int:
             train_classes=bundle.meta.get("train_classes"), num_classes=bundle.num_classes,
             n_valid=n_valid,
         )
-        # Model init (ResNet here, or the ViT that LearningToPrompt builds inside
-        # build_strategy) uses a seed independent of anything consumed above.
+        # Model init (backbone + fresh head) uses a seed independent of anything consumed above.
+        # Pretrained weights are loaded inside build_model (re-validates arm x benchmark/spec).
         seed_model_init(seed)
-        model = build_model(cfg.model, bundle.num_classes)
+        model_info: dict = {}
+        weights_dir = cfg.paths.get("weights_dir", None)
+        model = build_model(
+            cfg.model, bundle.num_classes, str(cfg.benchmark.name),
+            weights_dir=None if weights_dir is None else str(weights_dir), info=model_info,
+        )
+        update_provenance(run_dir, "params", model_info["params"])
+        update_provenance(run_dir, "weights", model_info["weights"])
+        log.info("model=%s: trainable params %d / %d", cfg.model.name,
+                 model_info["params"]["trainable"], model_info["params"]["total"])
         strategy = build_strategy(
             cfg.method, cfg.model, cfg.train, model, bundle.num_classes,
             evaluator, plugins, device, scenario=bundle.scenario, n_train_experiences=n_train,
@@ -490,6 +548,18 @@ def _run_locked(cfg: DictConfig, run_dir: Path, t_attempt: float) -> int:
                     p.write()
         # Always: n_done == 0 drops every line (the random-init eval is redone too).
         truncate_jsonl(run_dir / "metrics.jsonl", n_done)
+        probe_cfg = cfg.train.get("probe", None)
+        probe = None
+        probe_path = run_dir / PROBE_DIR
+        truncate_probe(probe_path, n_done)  # rows >= n_done (after the last checkpoint) are stale
+        if probe_cfg is not None and bool(probe_cfg.get("enabled", False)):
+            probe = build_probe_set(
+                test_stream, int(probe_cfg.get("max_images", 500)),
+                int(probe_cfg.get("probe_seed", 12345)),
+                data_root=str(cfg.paths.data_dir),
+            )
+            log.info("probe set: %d test images -> %s/row_XXXX.npz after every experience",
+                     len(probe), probe_path.name)
         progress = load_progress(run_dir, n_done)
         progress["wandb_history"].append(wandb_status)
         progress["deterministic_modes"].append(det_mode)
@@ -530,6 +600,12 @@ def _run_locked(cfg: DictConfig, run_dir: Path, t_attempt: float) -> int:
             edt, epeak = _measure(device, lambda: strategy.eval(test_stream, num_workers=nw))
             if valid_stream is not None:
                 strategy.eval(valid_stream, num_workers=nw)  # -> valid_matrix.json only
+            if probe is not None:
+                # Before the checkpoint: a crash in between leaves an extra row, which the
+                # resume truncates (truncate_probe) -- never a missing one.
+                feats = extract_probe(strategy.model, probe, device,
+                                      batch_size=int(cfg.train.eval_mb_size), num_workers=nw)
+                write_probe_row(probe_path, i, feats, probe)
             save_checkpoint_atomic(strategy, ckpt)
             n_done = i + 1
             _set_at(progress["train_time_s_per_exp"], i, tdt)
@@ -572,10 +648,13 @@ def _run_locked(cfg: DictConfig, run_dir: Path, t_attempt: float) -> int:
         _log_extra(loggers, {f"summary/{k}": v for k, v in summary.items()
                              if isinstance(v, (int, float))}, n_trained=n_done)
         (run_dir / "DONE").write_text("done\n", encoding="utf-8")
-        try:
-            (run_dir / "failure.json").unlink()
-        except FileNotFoundError:
-            pass
+        # After DONE the checkpoint is never read again (DONE short-circuits every re-run);
+        # ResNet-50 + optimizer/buffer state is ~0.3-1 GB per run on a 30 GB disk.
+        for leftover in ("failure.json", "checkpoint.pt"):
+            try:
+                (run_dir / leftover).unlink()
+            except FileNotFoundError:
+                pass
         log.info("Finished %s", run_dir)
         _wandb_finish(loggers, summary, exit_code=0)
         return EXIT_OK
@@ -624,10 +703,39 @@ def _jsonable(obj):
 _RESULT = {"code": EXIT_OK}
 
 
+def _remove_hydra_only_dir(run_dir: Path, stop_at: Path) -> None:
+    """Remove ``run_dir`` if it holds nothing but Hydra's job log (exit 2 path, CLI only).
+
+    Hydra creates ``hydra.run.dir`` (= run_dir) and its ``train.log`` before the task runs. The
+    log handler is closed first (Windows cannot delete an open file); then empty parents up to
+    (excluding) ``stop_at`` are removed too. Anything else in the directory keeps it untouched.
+    """
+    try:
+        if not run_dir.is_dir() or not set(os.listdir(run_dir)) <= {"train.log"}:
+            return
+        target = run_dir.resolve()
+        for lg in [logging.getLogger(), log]:
+            for h in list(lg.handlers):
+                fn = getattr(h, "baseFilename", None)
+                if fn and Path(fn).resolve().parent == target:
+                    lg.removeHandler(h)
+                    h.close()
+        for f in run_dir.iterdir():
+            f.unlink()
+        d, stop = target, stop_at.resolve()
+        while d != stop and stop in d.parents and not any(d.iterdir()):
+            d.rmdir()
+            d = d.parent
+    except OSError as exc:  # never turn exit 2 into a crash
+        log.warning("Could not remove %s: %s", run_dir, exc)
+
+
 @hydra.main(config_path="../../configs", config_name="train", version_base="1.3")
 def _hydra_main(cfg: DictConfig) -> None:
     log.info("Config:\n%s", OmegaConf.to_yaml(cfg, resolve=True))
     _RESULT["code"] = run(cfg)
+    if _RESULT["code"] == EXIT_INVALID_CONFIG:
+        _remove_hydra_only_dir(Path(str(cfg.run_dir)), Path(str(cfg.paths.output_dir)))
 
 
 def main() -> None:

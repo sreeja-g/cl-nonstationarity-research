@@ -5,7 +5,7 @@
 defaults:
   - override /benchmark: synthetic
   - override /method: naive
-  - override /model: resnet18
+  - override /model: r18_scratch
   - override /logger: none
 
 device: auto
@@ -21,7 +21,8 @@ benchmark:
   test_per_class: 4
 
 model:
-  cifar_stem: true           # 32x32 inputs
+  cifar_stem: true           # 32x32 inputs; scratch arms only (train.py resets it to false
+                             # for pretrained arms, e.g. experiment=smoke model=r18_places)
 
 train:
   epochs: 1

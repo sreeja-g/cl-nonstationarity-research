@@ -1,7 +1,16 @@
 #!/usr/bin/env bash
 # Download / prepare datasets under $CLNS_DATA_DIR (default $WORKSPACE/data). Resumable. The per-dataset
 # `.done` marker (required by the loaders) is written ONLY after the data was verified complete.
-# Usage: bash scripts/download_data.sh <clear10|core50|domainnet|imagenet100|all> [--force]
+# Usage: bash scripts/download_data.sh <clear10|core50|domainnet|imagenet100|all|places365|dino|weights> [--force]
+# Weights (into $CLNS_WEIGHTS_DIR, default $WORKSPACE/weights; NOT part of `all`):
+#   places365 : CSAIL resnet18_places365.pth.tar + resnet50_places365.pth.tar (model arms *_places*)
+#   dino      : official DINO dino_resnet50_pretrain.pth (shift encoder dino:resnet50)
+#   weights   : places365 + dino
+#   Downloads go to <file>.part, are verified, then renamed. Each file is verified against SHA_<NAME>
+#   (SHA_RESNET18_PLACES365 / SHA_RESNET50_PLACES365 default to the hashes pinned in
+#   configs/model/r{18,50}_places*.yaml; an already-present file is re-verified and re-downloaded on
+#   mismatch). SHA_DINO_RESNET50 has no default (not yet pinned): its sha256 is written to
+#   <file>.sha256 and printed, to be pinned in clns.shift.measure_stream.DINO_RESNET50_SHA256.
 # Disk: plan for a persistent volume of >= ~200 GiB. ImageNet needs ~156 GiB for the Kaggle zip plus ~25 GiB
 #   while extracting the 100 classes (the zip is deleted afterwards; the kept data is ~15 GiB). The free-space
 #   check runs only when something is actually downloaded, so re-runs on a full volume are fine.
@@ -24,6 +33,11 @@ if [ -f "$WORKSPACE/clns_env.sh" ]; then
 fi
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DATA="${CLNS_DATA_DIR:-$WORKSPACE/data}"
+WEIGHTS="${CLNS_WEIGHTS_DIR:-$WORKSPACE/weights}"
+# Pinned CSAIL Places365 hashes (verified against the real files 2026-10-11; also in configs/model/).
+SHA_RESNET18_PLACES365="${SHA_RESNET18_PLACES365:-2f4759217d470da2b803f8f66cd4488a066406b555a5fb95ee9a4663f9f05588}"
+SHA_RESNET50_PLACES365="${SHA_RESNET50_PLACES365:-46529c86902bd0cfb0ea562a30b2850c28d2620d96282b3db9c318e1d774f6c5}"
+SHA_DINO_RESNET50="${SHA_DINO_RESNET50:-}"   # unknown yet: recorded + printed, not verified
 log()  { printf '[%s] %s\n' "$(date +%H:%M:%S)" "$*"; }
 fail() { printf '[%s] FAIL: %s\n' "$(date +%H:%M:%S)" "$*" >&2; exit 1; }
 
@@ -32,11 +46,11 @@ TARGET=""
 for a in "$@"; do
   case "$a" in
     --force) FORCE=1 ;;
-    -h|--help) sed -n '2,15p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,24p' "$0"; exit 0 ;;
     *) TARGET="$a" ;;
   esac
 done
-[ -n "$TARGET" ] || fail "usage: $0 <clear10|core50|domainnet|imagenet100|all> [--force]"
+[ -n "$TARGET" ] || fail "usage: $0 <clear10|core50|domainnet|imagenet100|all|places365|dino|weights> [--force]"
 mkdir -p "$DATA"
 
 need_space() {  # need_space <GiB> <path>
@@ -217,7 +231,66 @@ get_imagenet100() {
   log "ImageNet-100 ready at $dest"
 }
 
+sha_of() { sha256sum "$1" | awk '{print $1}'; }
+
+get_weight() {  # get_weight <url> <file name> <name of the SHA_* variable>
+  local url="$1" name="$2" shavar="$3" dest want have
+  dest="$WEIGHTS/$name"
+  want="${!shavar:-}"
+  want="${want,,}"
+  mkdir -p "$WEIGHTS"
+  if [ "$FORCE" -eq 1 ]; then rm -f "$dest" "$dest.part" "$dest.sha256"; fi
+  if [ -f "$dest" ]; then
+    have="$(sha_of "$dest")"
+    if [ -n "$want" ] && [ "$have" != "$want" ]; then
+      # never silently accept a present file: re-download on mismatch
+      log "$name present but sha256 $have != $shavar=$want; deleting and re-downloading"
+      rm -f "$dest" "$dest.part" "$dest.sha256"
+    else
+      log "$name present"
+    fi
+  fi
+  if [ ! -f "$dest" ]; then
+    need_space 1 "$WEIGHTS"
+    log "fetching $name"
+    fetch "$url" "$dest.part"            # resumable; verified, then renamed
+    [ -s "$dest.part" ] || fail "$dest.part is missing or empty after download"
+    have="$(sha_of "$dest.part")"
+    if [ -n "$want" ] && [ "$have" != "$want" ]; then
+      rm -f "$dest.part"
+      fail "$name sha256 $have != $shavar=$want (download deleted; re-run to download again)"
+    fi
+    mv -f "$dest.part" "$dest"
+  fi
+  if [ -n "$want" ]; then
+    log "$name sha256 verified"
+  else
+    log "$name sha256=$have (UNPINNED: set $shavar to verify; pin it, see header)"
+  fi
+  printf '%s  %s\n' "$have" "$name" > "$dest.sha256"
+}
+
+get_places365() {
+  # CSAIL Places365 release (http://places2.csail.mit.edu/models_places365/), torchvision ResNets.
+  # CSAIL serves plain HTTP only (port 443 does not answer); integrity comes from the pinned
+  # sha256 (SHA_RESNET{18,50}_PLACES365 above), checked before the file is accepted.
+  local base="http://places2.csail.mit.edu/models_places365"
+  get_weight "$base/resnet18_places365.pth.tar" resnet18_places365.pth.tar SHA_RESNET18_PLACES365
+  get_weight "$base/resnet50_places365.pth.tar" resnet50_places365.pth.tar SHA_RESNET50_PLACES365
+}
+
+get_dino() {
+  # Official DINO ResNet-50 backbone-only checkpoint (github.com/facebookresearch/dino); loaded by
+  # clns.shift.measure_stream into torchvision resnet50 (no torch.hub).
+  get_weight "https://dl.fbaipublicfiles.com/dino/dino_resnet50_pretrain/dino_resnet50_pretrain.pth" \
+    dino_resnet50_pretrain.pth SHA_DINO_RESNET50
+  log "pin: clns.shift.measure_stream.DINO_RESNET50_SHA256 (or pass --dino-sha256)"
+}
+
 case "$TARGET" in
+  places365)   get_places365 ;;
+  dino)        get_dino ;;
+  weights)     get_places365; get_dino ;;
   clear10)     get_clear10 ;;
   core50)      get_core50 ;;
   domainnet)   get_domainnet ;;
