@@ -75,7 +75,9 @@ all_pairs for that benchmark with a warning and one ``analysis = accounting`` ro
 model can predict at that point): class-IL with eval-time masking (default) -> 1 / |classes
 seen in train experiences 0..k+1|; class-IL without masking and domain-IL -> 1 / number of
 classes. ``tuned``: transitions on which hyper-parameters were tuned
-(``--tuned-transitions clear10:0,clear10:1``). Flagged rows are kept and counted
+(``--tuned-transitions clear10:0,clear10:1`` flags every seed; ``--hparams-dir`` files flag only
+runs whose task order hash equals the tuning run's, see :func:`flag_tuned`). Flagged rows are kept
+and counted
 (``n_near_chance``, ``n_tuned``) unless ``--exclude-flagged`` (applied before stage 1).
 
 **Run accounting.** A run whose shift result does not match (:func:`select_shift` raises) is
@@ -114,6 +116,7 @@ from clns.analysis.transitions import (
     shift_transitions,
     transition_id,
 )
+from clns.utils.hparams import tuned_transitions_from_dir
 
 log = logging.getLogger(__name__)
 
@@ -199,7 +202,7 @@ def _chance(rec: dict, k: int) -> float:
 
 TABLE_COLUMNS = [
     "benchmark", "model", "method", "seed", "run", "k", "t", "forget", "shift", "a_tt",
-    "position", "cluster", "chance", "family", "kind",
+    "position", "cluster", "chance", "family", "kind", "task_order_sha256",
 ]
 
 
@@ -270,6 +273,7 @@ def load_table(runs_dir, shift_dir, pairs: str = "consecutive", strict: bool = F
             run=run_id, cluster=[transition_id(r, int(k)) for k in t["k"]],
             chance=[_chance(r, int(k)) for k in t["k"]],
             family=FAMILY.get(r["method"], "other"), kind=scenario_kind(r),
+            task_order_sha256=(r.get("benchmark_meta") or {}).get("task_order_sha256"),
         )
         frames.append(t)
     counts["all_pairs_skipped"] = sorted(not_full_benches)
@@ -301,12 +305,35 @@ def flag_near_chance(table: pd.DataFrame, margin: float = 0.05,
     return ((table["a_tt"] < chance + margin) & chance.notna()).fillna(False)
 
 
-def flag_tuned(table: pd.DataFrame, tuned: set[tuple[str, int]]) -> pd.Series:
-    """True for rows whose (benchmark, transition index k) was used for hyper-parameter tuning."""
-    return pd.Series(
-        [(b, int(k)) in tuned for b, k in zip(table["benchmark"], table["k"])],
-        index=table.index, dtype=bool,
-    )
+def flag_tuned(table: pd.DataFrame, tuned: set[tuple]) -> pd.Series:
+    """True for rows whose (benchmark, transition index k) was used for hyper-parameter tuning.
+
+    ``tuned`` entries: ``(benchmark, k)`` (``--tuned-transitions``: every seed), or
+    ``(benchmark, k, tuning_seed, task_order_sha256)`` (from the hparams files): flagged only if
+    the run's ``task_order_sha256`` equals the tuning one (so CLEAR-10, whose order does not
+    depend on the seed, is flagged for every seed), or -- when either hash is unknown -- if the
+    run's seed equals ``tuning_seed``. Runs on another task order (other seeds of ImageNet-100,
+    DomainNet, CORe50) are NOT flagged: their transitions were not tuned on.
+    """
+    n = len(table)
+    shas = table["task_order_sha256"] if "task_order_sha256" in table else [None] * n
+    seeds = table["seed"] if "seed" in table else [None] * n
+    flags = []
+    for b, k, seed, sha in zip(table["benchmark"], table["k"], seeds, shas):
+        hit = False
+        for e in tuned:
+            if e[0] != b or e[1] != int(k):
+                continue
+            if len(e) == 2:
+                hit = True
+            elif e[3] is not None and isinstance(sha, str):
+                hit = e[3] == sha
+            else:
+                hit = e[2] is not None and seed is not None and int(seed) == e[2]
+            if hit:
+                break
+        flags.append(hit)
+    return pd.Series(flags, index=table.index, dtype=bool)
 
 
 # --------------------------------------------------------------------------- #
@@ -914,7 +941,11 @@ def main(argv=None) -> int:
                     help="chance accuracy when a run's benchmark_meta does not give its classes "
                     "(default: such rows are not flagged)")
     ap.add_argument("--tuned-transitions", default="",
-                    help="benchmark:k,... transitions used for hyper-parameter tuning (flagged)")
+                    help="benchmark:k,... transitions used for hyper-parameter tuning (flagged); "
+                    "unioned with those read from --hparams-dir")
+    ap.add_argument("--hparams-dir", default=None,
+                    help="tuned-values directory (configs/hparams/<benchmark>/<arm>.yaml, "
+                    "'tuned_transitions' of each file are flagged); default <repo>/configs/hparams")
     ap.add_argument("--exclude-flagged", action="store_true",
                     help="drop near-chance and tuned transitions (default: keep, count)")
     ap.add_argument("--strict", action="store_true",
@@ -925,7 +956,7 @@ def main(argv=None) -> int:
     args = ap.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(message)s")
 
-    tuned = parse_tuned(args.tuned_transitions)
+    tuned = parse_tuned(args.tuned_transitions) | tuned_transitions_from_dir(args.hparams_dir)
     modes = ["consecutive", "all"] if args.pairs == "both" else [args.pairs]
     not_full = "skip" if args.pairs == "both" else "raise"
     rows: list[dict] = []

@@ -214,3 +214,18 @@ def test_run_grid_writes_start_row_before_launch():
     assert "trap 'on_signal TERM 143' TERM" in text
     for doc in ("measure_stream", "POD hours"):
         assert doc in text and doc in SCRIPT.read_text(encoding="utf-8")
+
+
+def test_counts_tune_trial_wall_time_from_jsonl(tmp_path):
+    out = tmp_path / "out"
+    ok, failed, both = (out / "tune" / "runs" / n for n in ("ok", "failed", "both"))
+    _progress(ok, 1800)                         # progress.json alone: 0.5 h
+    _progress(both, 3600)
+    failed.mkdir(parents=True)                  # crashed trial: no progress.json at all
+    d = out / "tune" / "optuna" / "b" / "a"
+    d.mkdir(parents=True)
+    recs = [{"run_dir": str(ok), "wall_s": 3600.0}, {"run_dir": str(failed), "wall_s": 1800.0},
+            {"run_dir": str(both), "wall_s": 600.0}, {"run_dir": None, "wall_s": None}]
+    (d / "s.jsonl").write_text("\n".join(json.dumps(r) for r in recs) + "\n")
+    # per run dir the larger of jsonl wall time and progress.json: 1.0 + 0.5 + 1.0 h
+    assert _mod().hours_used(out) == pytest.approx(2.5)

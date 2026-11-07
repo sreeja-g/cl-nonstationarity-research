@@ -21,6 +21,11 @@ Sources, per run directory (counted once, the larger of the two):
     to each attempt's last committed checkpoint, so for those runs failed attempts are
     undercounted.
 
+  * Optuna tuning (clns.tune): every record of <OUT>/tune/optuna/**/<study>.jsonl carries the
+    trial's ``run_dir`` and subprocess ``wall_s``; the wall times are summed per run dir and the
+    larger of that and progress.json is used, so failed / crashed trials (whose progress.json
+    undercounts or does not exist) are counted.
+
 What the cap does NOT include: GPU time of clns.shift.measure_stream (shift / feature
 extraction), idle pod time (setup, downloads, analysis, a pod left running after the grid),
 storage. The budget (~$50) is POD hours ($0.59/h for the whole pod, GPU used or not), so keep
@@ -104,6 +109,23 @@ def hours_used(out, now: datetime | None = None) -> float:
             if sec < 0 or sec != sec:
                 raise ValueError(f"{p}: invalid wall_clock_s_committed {sec!r}")
             per_run[_key(p.parent)] = sec
+    tune_wall: dict[str, float] = {}
+    optuna_dir = out / "tune" / "optuna"
+    if optuna_dir.is_dir():
+        for jp in optuna_dir.rglob("*.jsonl"):
+            for n, line in enumerate(jp.read_text(encoding="utf-8").splitlines(), 1):
+                if not line.strip():
+                    continue
+                rec = json.loads(line)
+                if rec.get("run_dir") is None or rec.get("wall_s") is None:
+                    continue
+                sec = float(rec["wall_s"])
+                if sec < 0 or sec != sec:
+                    raise ValueError(f"{jp}:{n}: invalid wall_s {sec!r}")
+                k = _key(rec["run_dir"])
+                tune_wall[k] = tune_wall.get(k, 0.0) + sec
+    for k, sec in tune_wall.items():
+        per_run[k] = max(per_run.get(k, 0.0), sec)
     lp = out / "logs" / "gpu_ledger.tsv"
     ledger = ledger_seconds(lp, now) if lp.exists() else {}
     total = sum(max(per_run.get(k, 0.0), ledger.get(k, 0.0)) for k in set(per_run) | set(ledger))

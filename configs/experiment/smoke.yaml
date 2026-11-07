@@ -10,6 +10,10 @@ defaults:
 
 device: auto
 
+# Tuned-values files are not applied here (tuning and smoke runs use the method defaults).
+hparams:
+  mode: "off"                # quoted: a bare off is the YAML boolean false
+
 # Smoke runs never share run directories with real runs (the run-dir path does not encode
 # protocol/hyper-parameters; the config fingerprint would refuse a mismatch with exit 4 anyway).
 paths:

@@ -62,33 +62,16 @@ def test_record_task_order_hash():
 
 
 def test_clear10_order_fixed_across_seeds(monkeypatch, load_benchmark_cfg, tmp_path):
-    """CLEAR's buckets keep their time order for every seed (stubbed Avalanche CLEAR)."""
+    """CLEAR's buckets keep their time order for every seed (stubbed bucket reader)."""
     pytest.importorskip("avalanche")
-    import avalanche.benchmarks.classic.clear as clear_mod
-    import torch
-    from torch.utils.data import TensorDataset
-
     from clns.data import clear10
-    from clns.data.common import make_cls_dataset
 
-    class _Exp:
-        def __init__(self, ds):
-            self.dataset = ds
+    def fake_read(root, split):
+        buckets = [[(f"{split}/{b}/{i}.png", i % 2) for i in range(4)] for b in range(10)]
+        return list(range(1, 11)), ["a", "b"], buckets
 
-    def fake_clear(**kw):
-        def stream(off):
-            out = []
-            for b in range(10):
-                x = torch.full((2, 3, 4, 4), float(b + off))
-                out.append(_Exp(make_cls_dataset(TensorDataset(x, torch.tensor([0, 1])), [0, 1])))
-            return out
-
-        bm = type("BM", (), {})()
-        bm.train_stream, bm.test_stream = stream(0), stream(100)
-        return bm
-
-    monkeypatch.setattr(clear_mod, "CLEAR", fake_clear)
-    monkeypatch.setattr(clear10, "_check_clear_disjoint", lambda *a, **k: None)
+    monkeypatch.setattr(clear10, "read_clear_buckets", fake_read)
+    monkeypatch.setattr(clear10, "check_clear_buckets", lambda *a, **k: None)
     root = tmp_path / "clear10"
     root.mkdir()
     (root / ".done").write_text("")

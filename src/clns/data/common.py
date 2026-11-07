@@ -298,6 +298,7 @@ def finalize(
     meta: dict,
     truncate_test: bool = True,
     test_identities: Sequence[str] | None = None,
+    valid_list: Sequence[Any] | None = None,
 ):
     """Uniform post-processing used by every loader.
 
@@ -312,7 +313,19 @@ def finalize(
     of every stream gets ``classes_in_this_experience`` etc.; needed by the eval-time
     class mask). Fills size bookkeeping and ``meta["train_classes"]`` (sorted classes
     of each final training experience) in ``meta``. Returns the CLScenario.
+
+    ``valid_list`` (CORe50 session hold-out): ready-made validation experiences (held-out data
+    that is NOT in ``train_list``); mutually exclusive with ``val_fraction`` > 0. They get task
+    label 0, the same ``subsample_per_class`` as the test stream (fixed ``subsample_seed``,
+    stable key ``valid|class_il``), are not truncated by ``max_experiences`` (the loader selects
+    them) and use eval transforms. ``meta["valid_exp_to_train_exp"]`` defaults to the identity
+    (set it before calling when the valid stream is grouped differently). A validation
+    experience without samples raises (an empty experience would make ``valid_matrix.json``
+    silently NaN), also for the ``val_fraction`` carve.
     """
+    val_fraction = float(cfg.get("val_fraction", 0.0) or 0.0)
+    if valid_list is not None and val_fraction > 0.0:
+        raise ValueError("finalize: valid_list cannot be combined with val_fraction > 0")
     train = [force_task_label_zero(d) for d in train_list]
     test = [force_task_label_zero(d) for d in test_list]
 
@@ -324,6 +337,8 @@ def finalize(
         train = train[:max_exp]
         if truncate_test:
             test = test[:max_exp]
+
+    valid = [force_task_label_zero(d) for d in valid_list] if valid_list is not None else None
 
     sub = cfg.get("subsample_per_class")
     subsample_seed = int(cfg.get("subsample_seed", 0) or 0)
@@ -339,9 +354,15 @@ def finalize(
             subsample_per_class(d, sub, subsample_seed, stable_key=ident)
             for d, ident in zip(test, ids)
         ]
+        if valid is not None:
+            valid = [
+                subsample_per_class(d, sub, subsample_seed, stable_key="valid|class_il")
+                for d in valid
+            ]
 
     streams: dict[str, list] = {}
-    val_fraction = float(cfg.get("val_fraction", 0.0) or 0.0)
+    if valid is not None:
+        streams["valid"] = [d.eval() for d in valid]
     if val_fraction > 0.0:
         new_train, valid = [], []
         # split_validation_class_balanced shuffles with the *global* torch RNG, so seed it
@@ -351,6 +372,11 @@ def finalize(
             for i, d in enumerate(train):
                 torch.manual_seed(seed * 1000 + i)
                 tr, va = split_validation_class_balanced(val_fraction, d)
+                if len(va) == 0:
+                    raise ValueError(
+                        f"val_fraction={val_fraction} leaves training experience {i} "
+                        f"({len(d)} samples) without validation samples"
+                    )
                 new_train.append(tr)
                 valid.append(va.eval())
         finally:
@@ -359,6 +385,9 @@ def finalize(
         streams["valid"] = valid
     streams["train"] = train
     streams["test"] = test
+    for j, d in enumerate(streams.get("valid", [])):
+        if len(d) == 0:
+            raise ValueError(f"validation experience {j} is empty")
 
     meta["n_train_experiences"] = len(train)
     meta["n_test_experiences"] = len(test)
@@ -369,6 +398,7 @@ def finalize(
     meta["test_sizes"] = [len(d) for d in test]
     if "valid" in streams:
         meta["valid_sizes"] = [len(d) for d in streams["valid"]]
+        meta.setdefault("valid_exp_to_train_exp", list(range(len(streams["valid"]))))
     meta.setdefault("test_exp_to_train_exp", list(range(len(test))))
     meta["val_fraction"] = val_fraction
     meta["subsample_per_class"] = sub

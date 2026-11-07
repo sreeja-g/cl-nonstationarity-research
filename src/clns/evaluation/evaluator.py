@@ -225,12 +225,16 @@ def build_evaluator(
     train_classes: Sequence[Sequence[int]] | None = None,
     num_classes: int | None = None,
     n_valid: int | None = None,
+    valid_exp_to_train_exp: Sequence[int] | None = None,
 ) -> tuple[EvaluationPlugin, list]:
     """Return ``(EvaluationPlugin, plugins)`` -- the plugins go to the strategy's ``plugins``.
 
     plugins = [EvalClassMaskPlugin (class-IL and ``train.eval_mask_unseen``, needs
     ``train_classes`` + ``num_classes``), AccuracyMatrixPlugin(test, with per-class counts),
     AccuracyMatrixPlugin(valid -> valid_matrix.json; only if ``n_valid``)].
+    ``valid_exp_to_train_exp`` (default: identity) maps each valid experience to the train
+    experience that introduced its classes (CORe50 session hold-out); its length must be
+    ``n_valid``.
     The mask plugin comes first so that every later ``after_eval_iteration`` consumer (per-class
     counts, Avalanche accuracy in the EvaluationPlugin, which runs after all user plugins) sees
     the masked logits.
@@ -284,9 +288,15 @@ def build_evaluator(
         plugins.append(EvalClassMaskPlugin(train_classes, num_classes))
     plugins.append(AccuracyMatrixPlugin(run_dir, n_test, test_exp_to_train_exp, scenario))
     if n_valid:
+        v_map = (list(range(int(n_valid))) if valid_exp_to_train_exp is None
+                 else [int(m) for m in valid_exp_to_train_exp])
+        if len(v_map) != int(n_valid):
+            raise ValueError(
+                f"valid_exp_to_train_exp has {len(v_map)} entries, valid stream has {n_valid}"
+            )
         plugins.append(
             AccuracyMatrixPlugin(
-                run_dir, int(n_valid), list(range(int(n_valid))), scenario,
+                run_dir, int(n_valid), v_map, scenario,
                 stream_name="valid", filename="valid_matrix.json", track_per_class=False,
             )
         )

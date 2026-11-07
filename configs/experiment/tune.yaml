@@ -1,15 +1,23 @@
 # @package _global_
-# Hyper-parameter tuning on the PILOT benchmark (CLEAR-10), first transitions only, scored on a
-# held-out validation stream carved from TRAIN (never on test). One small grid per method via
-# Hydra multirun, e.g.
+# Hyper-parameter tuning on the first experiences of a benchmark (default CLEAR-10: transitions 0 and 1),
+# scored on a held-out validation stream carved from TRAIN (never on test).
+# Normal workflow: Optuna, one resumable seeded study per benchmark x arm x method; every trial is a
+# `clns.train experiment=tune ...` subprocess (see the clns.tune docstring for the search space):
+#   python -m clns.tune --benchmark clear10 --arm r18_scratch --method all --epochs 2 --write-best
+# --write-best merges the best trials into configs/hparams/<benchmark>/<arm>.yaml, which production
+# `clns.train` applies (hparams.mode=required; mode "off" here). Tuning epochs (shortened schedule)
+# DIFFER from the final epochs; this replaces the old "tuning epochs == final epochs" rule.
+# Budget/behaviour (details in the clns.tune docstring and the README): equal counted trials per method (20;
+# 10 for clear10/domainnet), TPE n_startup_trials = max(3, n_trials // 4), --max-hours / $GPU_HOURS_CAP guard,
+# tuned transitions flagged in the analysis only for the tuning seed's task order, and the untuned fallback lr
+# of pretrained arms is train.yaml's 0.01 (the tuning start is 0.001). Tune only the arms you actually run
+# (4 arms x 60 trials x 5 methods = 1200 trials otherwise).
+# CORe50-NIC has no frame-level validation: clns.tune adds benchmark.val_fraction=0.0
+# benchmark.val_sessions=[1] (whole-session hold-out) to every trial.
+# Manual grids still work (run dir encodes the overrides, see below), e.g.
 #   python -m clns.train experiment=tune method=ewc method.ewc_lambda=100,1000,10000 seed=0,1,2 --multirun
-#   python -m clns.train experiment=tune method=lwf method.alpha=0.5,1,2 --multirun
-#   python -m clns.train experiment=tune method=er method.mem_size=500,2000 --multirun
-#   python -m clns.train experiment=tune method=derpp method.alpha=0.1,0.3 method.beta=0.5,1.0 --multirun
-# Order: tune -> write the chosen values into configs/method/*.yaml -> pilot -> grid. They are reused on
-# EVERY benchmark and arm; changing configs/method/*.yaml after pilot/grid runs exist makes those runs exit 4
-# (config fingerprint mismatch).
-# Pass the transitions used here to the analysis (the tuned transitions are flagged):
+# Pass the transitions used here to the analysis (read from configs/hparams automatically via
+# --hparams-dir, or explicitly):
 #   python -m clns.analysis.hypotheses ... --tuned-transitions clear10:0,clear10:1
 # Needs ${paths.data_dir}/clear10 (scripts/download_data.sh clear10).
 defaults:
@@ -19,6 +27,10 @@ defaults:
   - override /logger: none
 
 device: auto
+
+# Tuned-values files are not applied here (tuning and smoke runs use the method defaults).
+hparams:
+  mode: "off"                # quoted: a bare off is the YAML boolean false
 
 # Tuning runs never share run directories with real runs (output root .../tune).
 paths:

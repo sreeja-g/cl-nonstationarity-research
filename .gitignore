@@ -84,3 +84,6 @@ kaggle.json
 
 # Pretrained weight files (downloaded by scripts/download_data.sh; checksums pinned in configs)
 /weights/
+
+# Optuna lock files next to the tuned-values files
+configs/hparams/**/.*.lock

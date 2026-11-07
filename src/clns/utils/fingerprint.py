@@ -8,7 +8,9 @@ start (before the DONE check) refuses to run (exit code 4) if the fingerprint di
 
 Volatile (excluded) keys -- they may change between attempts without changing results:
 ``paths``, ``logger``, ``device``, ``hydra``, ``run_dir``, ``deterministic``,
-``train.num_workers``, ``train.eval_mb_size``, ``train.stop_after_experiences``.
+``train.num_workers``, ``train.eval_mb_size``, ``train.stop_after_experiences``,
+``hparams.mode``, ``hparams.dir`` (``hparams.applied`` -- the tuned values actually applied --
+IS fingerprinted; a changed pod path of the hparams dir must not trigger exit 4).
 
 ``deterministic`` is volatile so that the documented recovery (a ``strict`` run stopped by an op
 without a deterministic kernel -> rerun with ``deterministic=warn``) resumes instead of being
@@ -29,6 +31,7 @@ from .checkpoint import atomic_write_json
 FINGERPRINT_FILE = "fingerprint.json"
 VOLATILE_TOP_KEYS = frozenset({"paths", "logger", "device", "hydra", "run_dir", "deterministic"})
 VOLATILE_TRAIN_KEYS = frozenset({"num_workers", "eval_mb_size", "stop_after_experiences"})
+VOLATILE_HPARAMS_KEYS = frozenset({"mode", "dir"})
 
 
 def comparable_config(cfg_container: dict) -> dict:
@@ -36,6 +39,8 @@ def comparable_config(cfg_container: dict) -> dict:
     out = {k: v for k, v in cfg_container.items() if k not in VOLATILE_TOP_KEYS}
     if isinstance(out.get("train"), dict):
         out["train"] = {k: v for k, v in out["train"].items() if k not in VOLATILE_TRAIN_KEYS}
+    if isinstance(out.get("hparams"), dict):
+        out["hparams"] = {k: v for k, v in out["hparams"].items() if k not in VOLATILE_HPARAMS_KEYS}
     return out
 
 
@@ -93,6 +98,7 @@ __all__ = [
     "FINGERPRINT_FILE",
     "VOLATILE_TOP_KEYS",
     "VOLATILE_TRAIN_KEYS",
+    "VOLATILE_HPARAMS_KEYS",
     "comparable_config",
     "config_fingerprint",
     "diff_keys",

@@ -275,7 +275,7 @@ are not part of that name, so a resume finds its dir. Hydra matches these keys e
 Override values become a directory name: use only letters, digits and `. _ - = ,` (no `/ \ : * ? " < > |`, no
 spaces), and keep the `hp_` segment short (at most 255 bytes per path component on Linux; Windows limits paths
 to 260 characters unless long paths are enabled): sweep few keys per job with short values (`1e3`, not long
-lists); no hashing is applied. One small grid per method with Hydra multirun:
+lists); no hashing is applied. Manual grids (one small grid per method with Hydra multirun) still work:
 
 ```bash
 python -m clns.train experiment=tune method=ewc method.ewc_lambda=100,1000,10000 seed=0 --multirun
@@ -284,11 +284,53 @@ python -m clns.train experiment=tune method=er method.mem_size=500,2000 seed=0 -
 python -m clns.train experiment=tune method=derpp method.alpha=0.1,0.3 method.beta=0.5,1.0 seed=0 --multirun
 ```
 
-Then write the chosen values into `configs/method/*.yaml` **before the pilot and the grid** (order: tune ->
-`configs/method/*.yaml` -> pilot -> grid); they are reused on every benchmark and arm. Changing a method config
-after pilot/grid runs exist makes those runs exit 4 (config fingerprint) on the next launch. The tuned
-transitions are flagged in the analysis (`--tuned-transitions clear10:0,clear10:1`). Tuning runs count towards
-`GPU_HOURS_CAP` when the grid uses the same `CLNS_OUTPUT_DIR`.
+**Optuna (the normal workflow).** `clns.tune` runs one resumable, seeded TPE study per benchmark x arm x method
+(each trial is a `clns.train experiment=tune` subprocess; scratch and pretrained arms are tuned separately):
+
+```bash
+python -m clns.tune --benchmark clear10 --arm r18_scratch --method all --epochs 2 --write-best
+```
+
+- **Space.** Tuned: `train.lr` (all methods), `method.ewc_lambda`, lwf/derpp `method.alpha`, derpp `method.beta`,
+  each on a log scale from start/10 to start*10; the start (paper) value is trial 0. Starts: lr 0.01 (scratch arms)
+  / 0.001 (pretrained arms), `ewc_lambda` 1000, lwf `alpha` 1, derpp `alpha` 0.1 / `beta` 0.5. Fixed: `mem_size`,
+  `batch_size_mem`, `temperature`, `storage`, EWC `mode`/`decay_factor`. `--extra` only accepts volatile keys
+  (`train.num_workers`, `train.eval_mb_size`, `device`, `deterministic`, `paths.*`; test-size caps on `synthetic`).
+  Note: the untuned fallback for pretrained arms (`hparams.mode=untuned`) is the method default `train.lr=0.01`
+  from `configs/train.yaml`, not the tuning start 0.001.
+- **Budget.** Equal per method (`--n-trials`, default 20; 10 for clear10 and domainnet), 1 seed (`seed=0`),
+  shortened schedule (`--epochs`, differs from the final epochs). Only COMPLETE trials and FAIL trials caused by the
+  hyper-parameters (training crashed / NaN) count; interrupted or stale trials are re-enqueued on resume and do not
+  count (so trial 0 is always evaluated), and an environment failure (exit 2/3/4/5, missing data, bad run dir)
+  aborts the study. `--max-hours H` (default `$GPU_HOURS_CAP` if set) stops the study cleanly before a trial once
+  `scripts/gpu_hours.py` reports H pod hours (tuning trial wall times from the study JSONL are included, so failed
+  trials count); the hours used are logged after each trial. Rough size: 4 arms x (20 + 10 + 10 + 20 trials) x 5
+  methods = 1200 trials if every arm is tuned on every benchmark - tune only the arms you actually run.
+- **Sampler.** `TPESampler(seed)` with `n_startup_trials = max(3, n_trials // 4)` (fixed when the study is created,
+  recorded in the study attrs and provenance, reused on resume). A resume re-seeds TPE, so continued proposals
+  differ from an uninterrupted study (the history is identical).
+- **Records.** `$CLNS_OUTPUT_DIR/tune/optuna/<benchmark>/<arm>/<method>.db` (sqlite, 60 s timeout) plus
+  `<study>.jsonl` / `<study>.csv` (every trial incl. failed / interrupted / stale ones; `study` column). Keep this
+  directory on the pod's local disk, not on a network share. One process per study (`<method>.db.lock`, flock;
+  Linux only). Study attrs compare the sampler seed, non-volatile extras, start values, epochs and a hash of the
+  fixed method / train config (a changed `configs/method/<m>.yaml` is refused); the git commit is only recorded.
+- **CORe50-NIC.** No frame-level validation exists, so trials use whole-session validation
+  (`benchmark.val_fraction=0.0 benchmark.val_sessions=[1]`, added by `clns.tune`).
+- **`--write-best`** merges the best trials into `configs/hparams/<benchmark>/<arm>.yaml` (values + provenance +
+  `tuned_transitions` + `tuning_seed` + the tuning runs' `task_order_sha256`); it refuses unless `--n-trials` trials
+  are COMPLETE (`--force` overrides) and locks / atomically replaces the file.
+- **Production.** `clns.train` applies that file (`hparams.mode=required`: a missing file or method entry exits 2
+  before the run dir exists; `hparams.mode=untuned` keeps the method defaults and records `status: untuned`;
+  command-line overrides win; path, sha256 and applied values go to `provenance.json` -> `hparams`).
+  `scripts/run_grid.sh --dry-run` lists missing tuned-values files / entries and the grid warns if `EXTRA_ARGS`
+  sets `train.lr` or `method.*` (they replace the tuned values of every run).
+- **Analysis.** Tuned transitions are read from `--hparams-dir` (default `configs/hparams`) and unioned with
+  `--tuned-transitions`. From the files, only runs whose task order hash equals the tuning run's are flagged (CLEAR-10:
+  every seed; ImageNet-100 / DomainNet / CORe50: the tuning seed 0 - other seeds' transitions are NOT flagged);
+  `--tuned-transitions bench:k` flags every seed.
+
+Order: tune -> `configs/hparams` -> pilot -> grid; changing the file afterwards changes the applied values, so those
+runs exit 4. Tuning runs count towards `GPU_HOURS_CAP` when the grid uses the same `CLNS_OUTPUT_DIR`.
 
 ## After a pod restart or preemption
 

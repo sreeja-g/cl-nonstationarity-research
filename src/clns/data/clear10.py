@@ -1,25 +1,48 @@
 """CLEAR-10 domain-incremental benchmark (iid protocol only).
 
 Avalanche's ``CLEAR(..., evaluation_protocol="streaming")`` makes the test stream a duplicate of
-the train stream (train == test data -> leakage), so only ``"iid"`` (70:30 split inside each
-time bucket, split seed in 0..4) is allowed. Source: avalanche/benchmarks/classic/clear.py (v0.6.0).
-Labels: 10 concepts + BACKGROUND = 11 classes.
+the train stream (train == test data -> leakage), so only ``"iid"`` is allowed. For
+``data_name="clear10"`` (no underscore) Avalanche (datasets/clear/clear.py, v0.6.0,
+``_load_metadata_new``) reads the released ``train/`` and ``test/`` folders as they are: the test
+set is the separate released test folder, there is NO 70:30 split and the ``seed`` argument is
+only checked against ``SEED_LIST`` (the 7:3 ``testset_ratio_0.3/split_<seed>`` file lists belong
+to the old ``clear10_...`` names). ``split_seed`` therefore has no effect and must be 0.
+
+AVALANCHE BUG (v0.6.0, ``_CLEARImage._load_metadata_new``, clear.py ~line 338): ``samples = []``
+is created once per split OUTSIDE the ``for bucket`` loop and the same list object is appended
+for every bucket, so with ``CLEAR(...)`` every train and every test experience would hold the
+images of ALL buckets (no domain shift at all). This module therefore does NOT use ``CLEAR(...)``:
+:func:`read_clear_buckets` builds fresh per-bucket ``(path, class index)`` lists from
+``<root>/<split>/labeled_metadata.json``, ``class_names.txt`` and the per-class metadata files
+(same parsing as Avalanche's ``_load_metadata_new``, paths ``<split>/<IMG_PATH>`` relative to the
+root), buckets in ascending integer key order (ids recorded as ``bucket_ids`` in the meta), and
+the experiences are ``PathsDataset`` s like in the other loaders. Labels: 10 concepts +
+BACKGROUND = 11 classes.
+
 Requires ``<root>/.done`` (``scripts/download_data.sh clear10``) unless allow_download /
-require_done_marker=false. Train/test file disjointness is asserted per bucket.
+require_done_marker=false (Avalanche is no longer used, so nothing is downloaded here). Checks
+(:func:`check_clear_buckets`): buckets of a split pairwise disjoint, bucket sizes sum to the
+unique files, train/test disjoint by full path and by file name, same bucket ids in train and test,
+every image exists, number of buckets == ``n_experiences``.
 Task order: the time order of the buckets, the same for every training seed (``task_order`` =
 bucket indices, ``task_order_sha256`` in the meta).
 """
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
+
+from avalanche.benchmarks.utils.datasets_from_filelists import PathsDataset
 
 from .common import (
     BenchmarkBundle,
     assert_disjoint,
+    basename_key,
     build_transforms,
     dataset_classes,
     finalize,
+    make_cls_dataset,
     record_task_order,
     require_data_root,
 )
@@ -27,29 +50,63 @@ from .common import (
 _SEEDS = (0, 1, 2, 3, 4)
 
 
-def _check_clear_disjoint(root: Path, split_seed: int) -> None:
-    """Train/test file disjointness per bucket and overall (iid protocol).
+def read_clear_buckets(root: Path, split: str):
+    """Per-bucket ``(root-relative path, class index)`` lists of one released split.
 
-    The CLScenario returned by Avalanche's ``CLEAR`` does not expose file paths, so the same
-    split lists are re-read with ``_CLEARImage(..., split="train"|"test", seed=split_seed)``
-    and ``get_paths_and_targets(root_appended=False)`` (one list of (path, target) per bucket),
-    exactly as ``avalanche/benchmarks/classic/clear.py`` (v0.6.0) builds the benchmark.
-    Private Avalanche API (pinned avalanche-lib==0.6.0).
+    Mirrors Avalanche's ``_load_metadata_new`` (datasets/clear/clear.py, v0.6.0) but with a FRESH
+    list per bucket. Returns ``(bucket_ids, class_names, buckets)``; buckets are in ascending
+    integer key order of ``labeled_metadata.json``.
     """
-    from avalanche.benchmarks.datasets.clear import _CLEARImage
+    folder = Path(root) / split
+    meta_file = folder / "labeled_metadata.json"
+    if not meta_file.is_file():
+        raise FileNotFoundError(f"CLEAR-10: missing {meta_file}")
+    labeled = json.loads(meta_file.read_text(encoding="utf-8"))
+    class_names = [
+        c.strip() for c in (folder / "class_names.txt").read_text().splitlines() if c.strip()
+    ]
+    try:
+        keys = sorted(labeled, key=int)
+    except ValueError as e:
+        raise ValueError(f"CLEAR-10 {split}: non-integer bucket keys {list(labeled)}") from e
+    buckets = []
+    for key in keys:
+        samples: list[tuple[str, int]] = []  # fresh per bucket (the Avalanche bug shares one)
+        for class_idx, name in enumerate(class_names):
+            meta = json.loads((folder / labeled[key][name]).read_text(encoding="utf-8"))
+            for v in meta.values():
+                samples.append((f"{split}/{v['IMG_PATH']}", class_idx))
+        buckets.append(samples)
+    return [int(k) for k in keys], class_names, buckets
 
-    kw = dict(root=root, data_name="clear10", download=True, verbose=False, seed=split_seed)
-    train = _CLEARImage(split="train", **kw).get_paths_and_targets(root_appended=False)
-    test = _CLEARImage(split="test", **kw).get_paths_and_targets(root_appended=False)
-    if len(train) != len(test):
-        raise ValueError(f"CLEAR-10: {len(train)} train buckets vs {len(test)} test buckets")
-    for b, (tr, te) in enumerate(zip(train, test)):
-        assert_disjoint([str(p) for p, _ in tr], [str(p) for p, _ in te], f"CLEAR-10 bucket {b}")
-    assert_disjoint(
-        [str(p) for bucket in train for p, _ in bucket],
-        [str(p) for bucket in test for p, _ in bucket],
-        "CLEAR-10 (all buckets)",
-    )
+
+def check_clear_buckets(root: Path, train, test, n_experiences: int) -> None:
+    """Leakage / sanity checks on the train and test bucket lists (see the module docstring)."""
+    for name, buckets in (("train", train), ("test", test)):
+        if len(buckets) != n_experiences:
+            raise ValueError(
+                f"CLEAR-10 {name}: {len(buckets)} buckets, expected {n_experiences}"
+            )
+        seen: set[str] = set()
+        for b, bucket in enumerate(buckets):
+            paths = [p for p, _ in bucket]
+            if not paths:
+                raise ValueError(f"CLEAR-10 {name} bucket {b} is empty")
+            if len(set(paths)) != len(paths):
+                raise ValueError(f"CLEAR-10 {name} bucket {b} lists a file twice")
+            assert_disjoint(sorted(seen), paths, f"CLEAR-10 {name}: bucket {b} vs earlier buckets")
+            seen.update(paths)
+        if len(seen) != sum(len(x) for x in buckets):  # defensive: sizes sum to unique files
+            raise ValueError(f"CLEAR-10 {name}: buckets overlap")
+    tr_all = [p for bucket in train for p, _ in bucket]
+    te_all = [p for bucket in test for p, _ in bucket]
+    assert_disjoint(tr_all, te_all, "CLEAR-10 (all buckets)")
+    assert_disjoint(tr_all, te_all, "CLEAR-10 (file names)", key=basename_key)
+    missing = [p for p in tr_all + te_all if not (Path(root) / p).is_file()]
+    if missing:
+        raise FileNotFoundError(
+            f"CLEAR-10: {len(missing)} listed images missing, e.g. {missing[:3]}"
+        )
 
 
 def build_clear10(cfg, data_dir: str, seed: int) -> BenchmarkBundle:
@@ -62,29 +119,38 @@ def build_clear10(cfg, data_dir: str, seed: int) -> BenchmarkBundle:
     split_seed = int(cfg.get("split_seed", 0))
     if split_seed not in _SEEDS:
         raise ValueError(f"CLEAR split_seed must be one of {_SEEDS}, got {split_seed}")
+    if split_seed != 0:
+        raise ValueError(
+            f"CLEAR-10: split_seed={split_seed} has no effect (Avalanche 0.6.0 reads the fixed "
+            f"released train/ and test/ folders for data_name='clear10'; the seed is only "
+            f"checked against SEED_LIST) -- use benchmark.split_seed=0. A seed other than 0 "
+            f"would be recorded as a different split that is in fact identical."
+        )
 
     root = Path(data_dir) / cfg.get("data_subdir", "clear10")
     require_data_root(root, cfg, "CLEAR-10", "clear10")
 
-    from avalanche.benchmarks.classic.clear import CLEAR  # heavy import, keep lazy
+    ids_tr, names_tr, tr_buckets = read_clear_buckets(root, "train")
+    ids_te, names_te, te_buckets = read_clear_buckets(root, "test")
+    if ids_tr != ids_te or names_tr != names_te:
+        raise ValueError(
+            f"CLEAR-10 train/test differ in buckets ({ids_tr} vs {ids_te}) or class names"
+        )
+    check_clear_buckets(root, tr_buckets, te_buckets, int(cfg.n_experiences))
 
     train_tf, eval_tf = build_transforms(cfg)
-    bm = CLEAR(
-        data_name="clear10",
-        evaluation_protocol="iid",
-        seed=split_seed,
-        train_transform=train_tf,
-        eval_transform=eval_tf,
-        dataset_root=root,
-    )
-    _check_clear_disjoint(root, split_seed)
-    train_list = [e.dataset for e in bm.train_stream]
-    test_list = [e.dataset for e in bm.test_stream]
-    if len(train_list) != int(cfg.n_experiences) or len(test_list) != len(train_list):
-        raise ValueError(
-            f"CLEAR-10 returned {len(train_list)} train / {len(test_list)} test experiences, "
-            f"expected {cfg.n_experiences}"
-        )
+
+    def _datasets(buckets, group):
+        return [
+            make_cls_dataset(
+                PathsDataset(root, files), targets=[y for _, y in files],
+                train_transform=train_tf, eval_transform=eval_tf, group=group,
+            )
+            for files in buckets
+        ]
+
+    train_list = _datasets(tr_buckets, "train")
+    test_list = _datasets(te_buckets, "eval")
     classes = sorted({c for d in train_list for c in dataset_classes(d)})
     num_classes = max(classes) + 1
 
@@ -92,6 +158,8 @@ def build_clear10(cfg, data_dir: str, seed: int) -> BenchmarkBundle:
         "protocol": "iid",
         "split_seed": split_seed,
         "classes": classes,
+        "bucket_ids": ids_tr,
+        "class_names": names_tr,
         "n_experiences_full": len(train_list),
         "dataset_root": str(root),
     }

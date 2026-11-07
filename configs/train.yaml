@@ -55,6 +55,16 @@ train:
     max_images: 500
     probe_seed: 12345
 
+# Tuned hyper-parameters (clns.tune --write-best -> configs/hparams/<benchmark>/<model>.yaml; see
+# clns.utils.hparams). required: a missing file / method entry -> exit 2 before the run dir exists;
+# untuned: warn, keep the method defaults (status "untuned" in provenance.json); off: apply nothing
+# (experiment=tune|smoke*). Command-line overrides win over the file. mode/dir are volatile (not
+# fingerprinted); `applied` (filled by train.py) is fingerprinted. dir null -> <repo>/configs/hparams.
+hparams:
+  mode: required             # required | untuned | "off"
+  dir: null
+  applied: {}
+
 # Contract run directory; train.py reads this key, Hydra uses it as its run dir.
 run_dir: ${paths.output_dir}/runs/${benchmark.name}/${model.name}/${method.name}/seed${seed}
 

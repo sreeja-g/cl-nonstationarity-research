@@ -18,6 +18,11 @@ on success) and DONE (success only). No ``.hydra/``
 ``experiment=smoke*`` configs write under ``<output_dir>/smoke/runs/...`` so smoke results never
 share a directory with real runs.
 
+Tuned hyper-parameters: ``configs/hparams/<benchmark>/<model>.yaml`` (written by
+``clns.tune --write-best``, see clns.utils.hparams) is merged into the config right after the
+model overrides, before the fingerprint (``hparams.mode``: required | untuned | off; command-line
+overrides win). The file path / sha256 / applied values go to provenance.json (``hparams``).
+
 Flow: model-driven overrides (non-null model.image_size / model.normalization copied into the
 benchmark config, e.g. ImageNet statistics for pretrained arms; model.cifar_stem reset to false for
 pretrained arms) -> pre-flight model check (``clns.models.validate_model_config``: arm x benchmark,
@@ -42,7 +47,8 @@ the end of the run); time spent in an attempt after its last checkpoint (a crash
 
 Exit codes: 0 success / already done / stopped by ``train.stop_after_experiences``;
 1 any other error (failure.json written, exception re-raised);
-2 invalid model configuration (pre-flight check above): nothing is written, no run dir (the
+2 invalid model configuration (pre-flight check above) or missing tuned hyper-parameters
+(``hparams.mode=required``): nothing is written, no run dir (the
 ``hydra.run.dir`` Hydra creates for its own train.log is removed again if it holds nothing else);
 same meaning as run_grid.sh's own exit 2 (usage/config error), not retried there;
 3 CUDA out-of-memory (failure.json written);
@@ -80,6 +86,7 @@ from clns.utils.checkpoint import (
     save_checkpoint_atomic,
 )
 from clns.utils.fingerprint import FINGERPRINT_FILE, check_or_write_fingerprint
+from clns.utils.hparams import HparamsError, apply_tuned_hparams
 from clns.utils.lock import RunDirLock, RunLockError
 from clns.utils.provenance import update_provenance, write_provenance
 
@@ -407,11 +414,32 @@ def preflight_model(cfg: DictConfig) -> str | None:
     return None
 
 
-def run(cfg: DictConfig) -> int:
-    """Run (or resume) one training job. Returns the process exit code."""
+def _task_overrides() -> list[str]:
+    """Command-line overrides of this Hydra job (``[]`` outside a Hydra job, e.g. in tests)."""
+    from hydra.core.hydra_config import HydraConfig
+
+    try:
+        return [str(o) for o in HydraConfig.get().overrides.task]
+    except Exception:  # noqa: BLE001 - HydraConfig not initialised
+        return []
+
+
+def run(cfg: DictConfig, cli_overrides: list[str] | None = None) -> int:
+    """Run (or resume) one training job. Returns the process exit code.
+
+    ``cli_overrides``: the command-line overrides (they win over tuned values); None -> the
+    Hydra job's task overrides, ``[]`` outside Hydra.
+    """
     t_attempt = time.perf_counter()
     run_dir = Path(str(cfg.run_dir))
     apply_model_overrides(cfg)
+    try:
+        hp_info = apply_tuned_hparams(cfg, _task_overrides() if cli_overrides is None
+                                      else cli_overrides)
+    except HparamsError as exc:
+        log.error("Invalid tuned hyper-parameters, refusing to start (exit %d; run dir %s not "
+                  "created): %s", EXIT_INVALID_CONFIG, run_dir, exc)
+        return EXIT_INVALID_CONFIG
     error = preflight_model(cfg)
     if error is not None:
         log.error("Invalid model configuration, refusing to start (exit %d; run dir %s not "
@@ -421,7 +449,7 @@ def run(cfg: DictConfig) -> int:
 
     old_term = _install_sigterm_handler()
     try:
-        return _run_with_lock(cfg, run_dir, t_attempt)
+        return _run_with_lock(cfg, run_dir, t_attempt, hp_info)
     finally:
         if old_term is not None:
             try:
@@ -430,7 +458,7 @@ def run(cfg: DictConfig) -> int:
                 pass
 
 
-def _run_with_lock(cfg: DictConfig, run_dir: Path, t_attempt: float) -> int:
+def _run_with_lock(cfg: DictConfig, run_dir: Path, t_attempt: float, hp_info: dict) -> int:
     lock = RunDirLock(run_dir)
     try:
         lock.acquire()
@@ -450,12 +478,12 @@ def _run_with_lock(cfg: DictConfig, run_dir: Path, t_attempt: float) -> int:
         if (run_dir / "DONE").exists():
             log.info("DONE exists in %s; nothing to do.", run_dir)
             return EXIT_OK
-        return _run_locked(cfg, run_dir, t_attempt)
+        return _run_locked(cfg, run_dir, t_attempt, hp_info)
     finally:
         lock.release()
 
 
-def _run_locked(cfg: DictConfig, run_dir: Path, t_attempt: float) -> int:
+def _run_locked(cfg: DictConfig, run_dir: Path, t_attempt: float, hp_info: dict) -> int:
     import torch
 
     device = resolve_device(cfg.device)
@@ -465,6 +493,7 @@ def _run_locked(cfg: DictConfig, run_dir: Path, t_attempt: float) -> int:
     write_provenance(
         run_dir, cfg, extra={"device": str(device), "deterministic_mode": det_mode}
     )
+    update_provenance(run_dir, "hparams", hp_info)
     loggers: list = []
     n_done = 0
     try:
@@ -494,7 +523,8 @@ def _run_locked(cfg: DictConfig, run_dir: Path, t_attempt: float) -> int:
         eval_valid = bool(cfg.train.get("eval_valid", False))
         if eval_valid and valid_stream is None:
             log.warning("train.eval_valid=true but there is no valid stream "
-                        "(benchmark.val_fraction=0); nothing to evaluate.")
+                        "(benchmark.val_fraction=0; CORe50: benchmark.val_sessions=null); "
+                        "nothing to evaluate.")
         if not eval_valid:
             valid_stream = None  # B3: never evaluated unless explicitly requested
         n_valid = len(valid_stream) if valid_stream is not None else None
@@ -507,6 +537,7 @@ def _run_locked(cfg: DictConfig, run_dir: Path, t_attempt: float) -> int:
             test_exp_to_train_exp=mapping, n_test=n_test,
             train_classes=bundle.meta.get("train_classes"), num_classes=bundle.num_classes,
             n_valid=n_valid,
+            valid_exp_to_train_exp=bundle.meta.get("valid_exp_to_train_exp"),
         )
         # Model init (backbone + fresh head) uses a seed independent of anything consumed above.
         # Pretrained weights are loaded inside build_model (re-validates arm x benchmark/spec).

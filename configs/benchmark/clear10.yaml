@@ -9,7 +9,7 @@ image_size: 224
 train_transform: resize_train
 eval_transform: resize_eval
 protocol: iid                # ONLY iid: 'streaming' makes test == train (leakage) and raises
-split_seed: 0                # CLEAR train/test split seed, 0..4
+split_seed: 0                # must be 0: no effect (Avalanche 0.6.0 reads the fixed released train/ and test/ folders); != 0 raises
 data_subdir: clear10
 allow_download: false
 normalization: imagenet      # pretrained model arms copy model.normalization here (train.py)

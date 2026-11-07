@@ -44,7 +44,8 @@
 # Exit codes of clns.train -> queue.tsv status:
 #   0 ok ('skipped' if DONE existed before the call; 'stopped' if no DONE after it) -> ok / skipped / stopped
 #   1 error (failure.json): retried ONCE after RETRY_BACKOFF s                    -> failed
-#   2 invalid model config (arm x benchmark, arm spec, missing Places365 weights); no run dir
+#   2 invalid model config (arm x benchmark, arm spec, missing Places365 weights) or missing tuned
+#     hyper-parameters (configs/hparams/<bench>/<arm>.yaml, hparams.mode=required); no run dir
 #     written: not retried                                                        -> invalid_config
 #   3 CUDA OOM: not retried                                                       -> oom
 #   4 config fingerprint mismatch with an existing run dir: not retried           -> config_mismatch
@@ -164,6 +165,8 @@ for a in "${EXTRA_A[@]+"${EXTRA_A[@]}"}"; do
   case "$k" in
     paths|paths.*|paths=*|run_dir*|hydra.run*|hydra.sweep*|hydra.job.chdir*|device|device=*|benchmark|benchmark=*|method|method=*|model|model=*|seed|seed=*|experiment|experiment=*|experiment.*)
       die "EXTRA_ARGS override '$a' is not allowed (the grid sets output location, benchmark, method, model, seed and device, and experiment=* configs redirect the output; use CLNS_OUTPUT_DIR / CLNS_DATA_DIR env vars for paths)" ;;
+    train.lr|train.lr=*|method.*)
+      echo "WARNING: EXTRA_ARGS override '$a' replaces the TUNED value (configs/hparams) of EVERY run in this grid; the tuned hyper-parameters are not used for this key." >&2 ;;
   esac
 done
 
@@ -203,6 +206,21 @@ if [ "$DRY" -eq 1 ]; then
            " # run_dir=$(run_dir_of "$b" "$a" "$m" "$s")  log=$OUT/logs/${b}_${a}_${m}_seed${s}.log"
     done
   done; done; done
+  echo "# tuned hyper-parameters (hparams.mode=required needs configs/hparams/<benchmark>/<arm>.yaml with an entry per method; a missing one makes clns.train exit 2):"
+  n_missing=0
+  for b in "${BENCH_A[@]}"; do for a in "${MODEL_A[@]}"; do
+    valid_combo "$a" "$b" || continue
+    hp="$REPO/configs/hparams/$b/$a.yaml"
+    if [ ! -f "$hp" ]; then
+      echo "# MISSING: configs/hparams/$b/$a.yaml (all methods)"; n_missing=$((n_missing + 1)); continue
+    fi
+    for m in "${METH_A[@]}"; do
+      if ! grep -q "^  ${m}:" "$hp"; then
+        echo "# MISSING: configs/hparams/$b/$a.yaml has no entry for method $m"; n_missing=$((n_missing + 1))
+      fi
+    done
+  done; done
+  echo "# tuned-values files/entries missing: $n_missing (unless EXTRA_ARGS sets hparams.mode=untuned|off)"
   echo "[dry-run] $n commands ($skipped benchmark x arm combinations skipped); nothing launched."
   exit 0
 fi
@@ -376,7 +394,7 @@ for s in "${SEED_A[@]}"; do for b in "${BENCH_A[@]}"; do for a in "${MODEL_A[@]}
     case "$rc" in
       0)   if [ "$was_done" -eq 1 ]; then log "SKIP (already_done) $b/$a/$m/seed$s"; status=skipped
            elif [ -f "$rd/DONE" ]; then status=ok; else status=stopped; fi; break ;;
-      2)   log "INVALID CONFIG (exit 2) for $b/$a/$m/seed$s: model arm/benchmark/weights check failed; not retrying (see $lg)"; status=invalid_config; break ;;
+      2)   log "INVALID CONFIG (exit 2) for $b/$a/$m/seed$s: model arm/benchmark/weights/tuned-hparams check failed; not retrying (see $lg)"; status=invalid_config; break ;;
       3)   log "OOM (exit 3) for $b/$a/$m/seed$s; not retrying"; status=oom; break ;;
       4)   log "CONFIG MISMATCH (exit 4) for $b/$a/$m/seed$s: existing run dir has a different config fingerprint; not retrying (see $lg)"; status=config_mismatch; break ;;
       5)   log "LOCKED (exit 5) for $b/$a/$m/seed$s: run dir is in use by another live process; not retrying"; status=locked; break ;;

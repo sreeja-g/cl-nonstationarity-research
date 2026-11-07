@@ -4,7 +4,11 @@ scenario: class_il
 n_experiences: 79            # train batches of nicv2_79; test = first-appearance class groups
 max_experiences: null
 subsample_per_class: null
-val_fraction: 0.0            # must stay 0: >0 raises (frame-level split leaks; session hold-out TODO)
+val_fraction: 0.0            # must stay 0: >0 raises (frame-level split leaks near-duplicate frames)
+val_sessions: null           # whole-session hold-out validation (train sessions 1,2,4,5,6,8,9,11). null = use all
+                             # (production). Tuning: [1], the same for every seed (tuning trains on 7/8 sessions).
+                             # CHECK [1] on the real filelists first (NICv2 batches are whole (object, session) units):
+                             # python -m clns.data.core50 --check-sessions --root <data>/core50 --run 0 --n-used 3 --val-sessions 1
 image_size: 128
 train_transform: resize_train
 eval_transform: resize_eval
