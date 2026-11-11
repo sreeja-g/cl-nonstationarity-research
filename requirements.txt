@@ -1,0 +1,6 @@
+torch
+torchvision
+avalanche-lib
+numpy
+matplotlib
+jupyter
